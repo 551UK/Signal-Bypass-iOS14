@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.1.1
+Version: 1.2.0
 Architecture: iphoneos-arm
-Description: Signal 7.19.1 iOS 14 rootful compatibility rollback to the stable v1.0.4 runtime path.
+Description: Signal 7.19.1 iOS 14 compatibility test using a fresh local AppExpiry identity while preserving the genuine 8.29 server User-Agent.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks

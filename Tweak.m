@@ -28,7 +28,7 @@ static void writeRuntimeMarker(void) {
     const char *process = getprogname();
     char payload[256];
     int payloadLength = snprintf(payload, sizeof(payload),
-        "SignalBypass14 v1.1.1 runtime constructor loaded\nprocess=%s\npid=%d\n",
+        "SignalBypass14 v1.2.0 runtime constructor loaded\nprocess=%s\npid=%d\n",
         process ? process : "<unknown>", getpid());
 
     if (payloadLength > 0) {
@@ -49,10 +49,10 @@ static void install(Class cls, NSString *name, IMP replacement, IMP *original);
 
 #import "StartupDiagnostics.h"
 static NSString *const targetVersion = @"8.29";
-static NSString *const targetBuild = @"1866"; // exact build from the supplied working Signal 8.29 IPA
+static NSString *const targetBuild = @"1867"; // local-only cache-busting build identity
 static NSString *const targetOS = @"16.3";
 static NSString *const networkUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.3";
-static const NSTimeInterval futureTimestamp = 1789506082.0; // exact Signal 8.29 build timestamp
+static const NSTimeInterval futureTimestamp = 1790082000.0; // 2026-09-22 13:00:00 UTC, local expiry-cache test
 static id (*originalObject)(id, SEL, NSString *);
 static NSDictionary *(*originalInfo)(id, SEL);
 
@@ -70,7 +70,7 @@ static id replacementValue(NSString *key, id value) {
     if ([key isEqualToString:@"BuildDetails"] && [value isKindOfClass:NSDictionary.class]) {
         NSMutableDictionary *details = [value mutableCopy];
         details[@"Timestamp"] = @(futureTimestamp);
-        details[@"DateTime"] = @"Tue Sep 15 21:01:22 UTC 2026";
+        details[@"DateTime"] = @"Tue Sep 22 13:00:00 UTC 2026";
         details[@"SignalCommit"] = @"3188f61b17c4b4caa837ab52a0babab5b9fd6423 Feature flags for .production.";
         details[@"XCodeVersion"] = @"2600.2660";
         return details;
@@ -229,7 +229,7 @@ static void showInjectionCanary(void) {
             hookMessage ? @"yes" : @"no",
             hookFunction ? @"yes" : @"no",
             (unsigned long)swiftHookCount];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.1.1 loaded"
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.2.0 loaded"
                                                                         message:message
                                                                  preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:nil]];
@@ -444,10 +444,10 @@ __attribute__((constructor)) static void start(void) {
         NSString *installedBuild = [main objectForInfoDictionaryKey:@"CFBundleVersion"];
         trace("kernel iOS14=%d; installed version=%s build=%s", isIOS14, installedVersion.UTF8String, installedBuild.UTF8String);
         BOOL originalMetadata = [installedVersion isEqualToString:@"7.19.1"] && [installedBuild isEqualToString:@"208"];
-        BOOL spoofedMetadata = [installedVersion isEqualToString:@"8.29"] && [installedBuild isEqualToString:@"1866"];
+        BOOL spoofedMetadata = [installedVersion isEqualToString:@"8.29"] && ([installedBuild isEqualToString:@"1867"] || [installedBuild isEqualToString:@"1866"]);
         if (!isIOS14 || (!originalMetadata && !spoofedMetadata)) {
             trace("inactive: unsupported OS/app version");
-            NSLog(@"[SignalBypass14] Inactive: requires iOS 14 with Signal 7.19.1 (208) or its spoofed 8.29 (1866) metadata");
+            NSLog(@"[SignalBypass14] Inactive: requires iOS 14 with Signal 7.19.1 (208) or its spoofed 8.29 metadata");
             return;
         }
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
@@ -474,6 +474,6 @@ __attribute__((constructor)) static void start(void) {
         install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
         installConcreteHTTPResponseHook();
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v1.1.1 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
+        NSLog(@"[SignalBypass14] v1.2.0 active; %lu pure-Swift registration hooks installed; local 8.29.0.1867 cache-busting metadata with network UA 8.29.0.1866", (unsigned long)swiftHookCount);
     }
 }

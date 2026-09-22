@@ -24,7 +24,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.1.1-rootful
+          name: SignalBypass14-1.2.0-rootful
           path: build/*.deb
           if-no-files-found: error
       - name: Publish prerelease
@@ -36,10 +36,10 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental build for Signal 7.19.1 (208), rootful iOS 14.
 
-          Stability rollback build.
+          Targeted AppExpiry cache-busting test based on the stable v1.1.1 runtime path.
 
-          v1.1.0 caused Signal to terminate on launch. v1.1.1 restores the exact runtime hook ordering and constructor behavior from v1.0.4, the last build confirmed to open Signal normally on the test device.
+          The supplied 7.19.1 source only restores a persisted AppExpiry state when its stored appVersion exactly matches AppVersionImpl.currentAppVersion. Earlier builds locally identified as 8.29.0.1866, so a previously persisted "immediately expired" state for that identity could survive all later retries.
 
-          No new registration hooks are introduced in this build. It keeps the arm64+arm64e rootful dylib, 0755 permissions, persisted 8.29.0.1866 metadata and the v1.0.4 compatibility hooks.
+          v1.2.0 changes only the local Signal identity to 8.29.0.1867 and uses a fresh 22 Sep 2026 BuildDetails timestamp. Network requests still force the genuine supplied 8.29 identity: Signal-iOS/8.29.0.1866 iOS/16.3. No new launch-path hooks are added.
           NOTES
-          gh release create v1.1.1 build/uk.551.signalbypass14_1.1.1_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.1.1' --notes-file build/release-notes.md --prerelease
+          gh release create v1.2.0 build/uk.551.signalbypass14_1.2.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.2.0' --notes-file build/release-notes.md --prerelease

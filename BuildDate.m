@@ -10,15 +10,16 @@
 // and uses it to build currentAppVersion and the default User-Agent before registration.
 
 static NSString *const spoofShortVersion = @"8.29";
-static NSString *const spoofBuildVersion = @"1866";
+static NSString *const spoofBuildVersion = @"1867";
+static NSString *const previousSpoofBuildVersion = @"1866";
 static NSString *const originalShortVersion = @"7.19.1";
 static NSString *const originalBuildVersion = @"208";
 
 static NSDictionary *spoofBuildDetails(void) {
     return @{
         @"XCodeVersion": @"2600.2660",
-        @"Timestamp": @1789506082,
-        @"DateTime": @"Tue Sep 15 21:01:22 UTC 2026",
+        @"Timestamp": @1790082000,
+        @"DateTime": @"Tue Sep 22 13:00:00 UTC 2026",
         @"SignalCommit": @"3188f61b17c4b4caa837ab52a0babab5b9fd6423 Feature flags for .production."
     };
 }
@@ -86,7 +87,8 @@ int main(int argc, const char *argv[]) {
                 BOOL original = [info[@"CFBundleShortVersionString"] isEqual:originalShortVersion] &&
                                 [info[@"CFBundleVersion"] isEqual:originalBuildVersion];
                 BOOL spoofed = [info[@"CFBundleShortVersionString"] isEqual:spoofShortVersion] &&
-                               [info[@"CFBundleVersion"] isEqual:spoofBuildVersion];
+                               ([info[@"CFBundleVersion"] isEqual:spoofBuildVersion] ||
+                                [info[@"CFBundleVersion"] isEqual:previousSpoofBuildVersion]);
                 if (!original && !spoofed) continue;
 
                 found++;
@@ -124,17 +126,17 @@ int main(int argc, const char *argv[]) {
                     NSDictionary *check = [NSDictionary dictionaryWithContentsOfFile:path];
                     if (![check[@"CFBundleShortVersionString"] isEqual:spoofShortVersion] ||
                         ![check[@"CFBundleVersion"] isEqual:spoofBuildVersion] ||
-                        [check[@"BuildDetails"][@"Timestamp"] doubleValue] != 1789506082.0) {
+                        [check[@"BuildDetails"][@"Timestamp"] doubleValue] != 1790082000.0) {
                         fputs("SignalBypass14: metadata verification failed.\n", stderr);
                         return 1;
                     }
-                    puts("SignalBypass14: persisted exact Signal 8.29 (1866) version/build metadata.");
+                    puts("SignalBypass14: persisted local Signal 8.29.0.1867 cache-busting metadata; server-facing UA remains 8.29.0.1866.");
                 }
             }
         }
 
         if (!found && !restore) {
-            fputs("SignalBypass14: compatible Signal app not found. Expected 7.19.1 (208) or the v0.7 spoofed metadata.\n", stderr);
+            fputs("SignalBypass14: compatible Signal app not found. Expected 7.19.1 (208) or an existing 8.29 spoofed metadata state.\n", stderr);
             return 1;
         }
         return 0;
