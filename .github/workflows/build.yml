@@ -70,7 +70,6 @@ jobs:
 
           Local spoof build advances to 1872 so any AppExpiry record created under 1871 is not restored.
           NOTES
-          NOTES
 
           gh release create v1.5.0 build/uk.551.signalbypass14_1.5.0_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
