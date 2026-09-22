@@ -164,6 +164,48 @@ static NSString *diagnosticSummary(void) {
     }
 }
 
+
+static UIViewController *topVisibleController(void) {
+    UIWindow *window = UIApplication.sharedApplication.keyWindow;
+    if (!window) {
+        for (UIWindow *candidate in UIApplication.sharedApplication.windows) {
+            if (!candidate.hidden && candidate.alpha > 0.0) {
+                window = candidate;
+                break;
+            }
+        }
+    }
+    UIViewController *controller = window.rootViewController;
+    while (controller.presentedViewController) controller = controller.presentedViewController;
+    if ([controller isKindOfClass:UINavigationController.class]) {
+        UIViewController *visible = ((UINavigationController *)controller).visibleViewController;
+        if (visible) controller = visible;
+    }
+    if ([controller isKindOfClass:UITabBarController.class]) {
+        UIViewController *selected = ((UITabBarController *)controller).selectedViewController;
+        if (selected) controller = selected;
+    }
+    return controller;
+}
+
+static void showInjectionCanary(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"org.whispersystems.signal"]) return;
+        UIViewController *controller = topVisibleController();
+        if (!controller) return;
+        NSString *message = [NSString stringWithFormat:
+            @"Tweak injection confirmed.\nMSHookMessageEx: %@\nMSHookFunction: %@\nSwift hooks: %lu",
+            hookMessage ? @"yes" : @"no",
+            hookFunction ? @"yes" : @"no",
+            (unsigned long)swiftHookCount];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v0.9 loaded"
+                                                                        message:message
+                                                                 preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:nil]];
+        [controller presentViewController:alert animated:YES completion:nil];
+    });
+}
+
 static void (*originalSetHeaderValue)(id, SEL, NSString *, NSString *);
 static void setHeaderValue(id self, SEL sel, NSString *value, NSString *field) {
     if ([field caseInsensitiveCompare:@"User-Agent"] == NSOrderedSame &&
