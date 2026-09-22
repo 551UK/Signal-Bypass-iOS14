@@ -1,34 +1,36 @@
 # Signal Bypass iOS 14
 
-## Version 1.4.2: side-by-side registration trace
+## Version 1.4.3: continue past verified SMS code
 
-This keeps the **v1.4.0 User-Agent fix** unchanged. That build removed the Update Required popup by forcing the final verification-session request to the exact identity observed in the successful iOS 16 trace:
+The v1.4.2 trace proved the complete verification-session flow is now accepted by Signal's server:
+
+`POST session -> PATCH challenge -> POST /code -> PUT /code -> verified=true`
+
+The next request in Signal's registration coordinator is:
+
+`POST /v1/registration`
+
+That request creates or re-registers the account using the already-verified session ID.
+
+v1.4.3 keeps the working verification-session rewrite unchanged and extends the same final `NSURLSession` User-Agent identity to `/v1/registration`:
 
 `Signal-iOS/8.29.0.1866 iOS/16.2`
 
-v1.4.2 adds detailed, sanitized logging so the iOS 14 attempt can be compared directly with the successful iOS 16 registration flow:
+Nothing else in the request is rewritten. In particular, the session ID, authorization, account attributes, prekeys and response status are left as Signal generated them.
 
-`POST session -> PATCH session -> POST /code -> PUT /code`
+### Logging
 
-The log records for every verification-session request:
+The same log now covers both stages:
 
-- sequence number
-- method and redacted endpoint
-- original User-Agent before rewrite
-- final User-Agent after rewrite
-- X-Signal-Agent, Content-Type and Accept-Language
-- sanitized request JSON
-- real HTTP status
-- selected response headers
-- sanitized response JSON
-- network error domain/code
+- `/v1/verification/session...`
+- `/v1/registration`
 
-Sensitive values are redacted, including phone number, session ID, push token, captcha token, verification code, credentials and authorization values.
+The log is no longer erased when Signal launches. Each app start adds a **NEW SIGNAL LAUNCH** separator, so a successful attempt is preserved even if Signal restarts.
+
+Sensitive values are redacted more aggressively, including the phone number, session ID, push challenge, tokens, auth values, UUID/account identifiers, passwords and cryptographic key/prekey material.
 
 Log location:
 
 `Signal/Documents/SignalBypass14-Registration.log`
 
-No HTTP status rewriting, private Swift expiry hooks, request-body changes or diagnostic popups are used.
-
-The local metadata identity remains **8.29.0.1870** so this logging build does not change another variable while we diagnose the spinner.
+The local metadata identity stays at **8.29.0.1870** so this build changes only the next network compatibility stage and diagnostics.
