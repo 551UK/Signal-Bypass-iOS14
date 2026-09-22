@@ -5,7 +5,6 @@
 #import <sys/utsname.h>
 #import <string.h>
 
-#import "StartupDiagnostics.h"
 
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
@@ -13,6 +12,9 @@ typedef void (*HookFunction)(void *, void *, void **);
 static HookMessage hookMessage;
 static HookFunction hookFunction;
 static NSUInteger swiftHookCount;
+static void install(Class cls, NSString *name, IMP replacement, IMP *original);
+
+#import "StartupDiagnostics.h"
 static NSString *const targetVersion = @"8.29";
 static NSString *const targetBuild = @"1866"; // exact build from the supplied working Signal 8.29 IPA
 static NSString *const targetOS = @"16.3";
