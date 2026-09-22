@@ -73,7 +73,6 @@ jobs:
 
           No websocket URL/auth rewriting is included.
           NOTES
-          NOTES
 
           gh release create v1.5.1 build/uk.551.signalbypass14_1.5.1_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
