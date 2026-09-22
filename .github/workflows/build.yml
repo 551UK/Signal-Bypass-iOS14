@@ -1,13 +1,18 @@
-name: Build iOS 16 Registration Tracer
+name: Build iOS 14 DEB
 on:
   push:
     branches: [main]
     paths:
-      - ios16-tracer/**
+      - Tweak.m
+      - StartupDiagnostics.h
+      - BuildDate.m
+      - control
+      - SignalBypass14.plist
+      - scripts/**
       - .github/workflows/build.yml
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     runs-on: macos-14
@@ -15,10 +20,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install package tools
         run: brew install ldid dpkg
-      - name: Build tracer package
-        run: bash ios16-tracer/build.sh
+      - name: Build and inspect rootful package
+        run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalRegistrationTracer16-0.1.0
-          path: ios16-tracer/build/*.deb
+          name: SignalBypass14-1.2.0-rootful
+          path: build/*.deb
           if-no-files-found: error
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cat > build/release-notes.md <<'NOTES'
+          Experimental build for Signal 7.19.1 (208), rootful iOS 14.
+
+          Targeted AppExpiry cache-busting test based on the stable v1.1.1 runtime path.
+
+          The supplied 7.19.1 source only restores a persisted AppExpiry state when its stored appVersion exactly matches AppVersionImpl.currentAppVersion. Earlier builds locally identified as 8.29.0.1866, so a previously persisted "immediately expired" state for that identity could survive all later retries.
+
+          v1.2.0 changes only the local Signal identity to 8.29.0.1867 and uses a fresh 22 Sep 2026 BuildDetails timestamp. Network requests still force the genuine supplied 8.29 identity: Signal-iOS/8.29.0.1866 iOS/16.3. No new launch-path hooks are added.
+          NOTES
+          gh release create v1.2.0 build/uk.551.signalbypass14_1.2.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.2.0' --notes-file build/release-notes.md --prerelease
