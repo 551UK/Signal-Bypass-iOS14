@@ -2,8 +2,9 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.4.2: keep the v1.4.0 final registration User-Agent rewrite and add
-// sanitized logging around the completion-handler requests Signal 7.19.1 uses.
+// v1.4.3: keep the verified v1.4.x verification-session User-Agent rewrite,
+// extend the exact same final rewrite to POST /v1/registration after the
+// SMS code has been accepted, and preserve sanitized logs across launches.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
@@ -61,8 +62,17 @@ static BOOL isSignalHost(NSString *host) {
 
 static BOOL isRegistrationRequest(NSURLRequest *request) {
     if (!request || !isSignalHost(request.URL.host)) return NO;
+
     NSString *path = request.URL.path.lowercaseString ?: @"";
-    return [path containsString:@"/v1/verification/session"];
+
+    // Stage 1: phone verification session.
+    if ([path containsString:@"/v1/verification/session"]) return YES;
+
+    // Stage 2: after the verification session returns verified=true,
+    // Signal creates/re-registers the account here.
+    if ([path isEqualToString:@"/v1/registration"]) return YES;
+
+    return NO;
 }
 
 static NSString *safePath(NSURL *url) {
@@ -85,12 +95,15 @@ static NSString *safePath(NSURL *url) {
 static BOOL sensitiveKey(NSString *key) {
     NSString *k = key.lowercaseString;
     if ([k isEqualToString:@"id"] || [k isEqualToString:@"number"] ||
-        [k isEqualToString:@"e164"] || [k isEqualToString:@"code"]) return YES;
+        [k isEqualToString:@"e164"] || [k isEqualToString:@"code"] ||
+        [k isEqualToString:@"aci"] || [k isEqualToString:@"pni"] ||
+        [k isEqualToString:@"uuid"] || [k isEqualToString:@"username"]) return YES;
 
     NSArray<NSString *> *needles = @[
         @"token", @"password", @"credential", @"authorization", @"auth",
         @"sessionid", @"session_id", @"verificationcode", @"captcha",
-        @"secret", @"identitykey", @"signedprekey", @"kyber"
+        @"pushchallenge", @"secret", @"identity", @"prekey", @"publickey",
+        @"signature", @"kyber", @"recoverypassword", @"registrationid"
     ];
     for (NSString *n in needles) if ([k containsString:n]) return YES;
     return NO;
@@ -289,9 +302,10 @@ __attribute__((constructor)) static void start(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"org.whispersystems.signal"]) return;
 
-        [@"" writeToFile:tracePath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"SignalBypass14 v1.4.2 registration trace\nApp: %@ (%@)\niOS: %@\nCompare against successful iOS16 flow: POST session -> PATCH session -> POST /code -> PUT /code.\nSensitive values are redacted.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.3 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: POST session -> PATCH session -> POST /code -> PUT /code -> POST /v1/registration.\nSensitive values are redacted.\n",
+            timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
             NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?"
