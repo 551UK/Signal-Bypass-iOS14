@@ -70,7 +70,6 @@ jobs:
 
           This build intentionally does not alter the legacy WebSocket path.
           NOTES
-          NOTES
 
           gh release create v1.4.9 build/uk.551.signalbypass14_1.4.9_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
