@@ -1,0 +1,39 @@
+name: Build iOS 16 Signal Message Tracer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ios16-message-tracer/**
+      - .github/workflows/build-ios16-message-tracer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install package tools
+        run: brew install ldid dpkg
+      - name: Build rootless tracer
+        run: bash ios16-message-tracer/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SignalMessageTracer16-0.1.0-rootless
+          path: ios16-message-tracer/build/*.deb
+          if-no-files-found: error
+      - name: Publish tracer release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release delete message-tracer16-v0.1.0 --yes 2>/dev/null || true
+          git push origin :refs/tags/message-tracer16-v0.1.0 2>/dev/null || true
+          gh release create message-tracer16-v0.1.0 ios16-message-tracer/build/uk.551.signalmessagetracer16_0.1.0_iphoneos-arm64.deb \
+            --target "$GITHUB_SHA" \
+            --title "Signal Message Tracer iOS 16 v0.1.0" \
+            --notes "Read-only rootless tracer for comparing a working iOS 16 Signal message send with the iOS 14 client. Logs message-related Signal URLs, methods, HTTP status, User-Agent, and whether auth headers are present. It does not log request/response bodies, credential values, or query values. Log: Documents/SignalMessageTrace16.log"
