@@ -2,20 +2,31 @@
 
 Experimental rootful compatibility tweak for Signal 7.19.1 (208) on iOS 14.
 
-## Version 1.2.0: fresh local AppExpiry identity
+## Version 1.3.0: minimal expiry-functions build
 
-This build stays on the stable v1.1.1 runtime path and tests a specific Signal 7.19.1 behavior.
+v1.3.0 deliberately removes the broad runtime instrumentation used during diagnosis and keeps the test focused on Signal's actual expiry/update paths.
 
-Signal stores its AppExpiry state together with `AppVersionImpl.currentAppVersion`. It only restores that stored expiry state when the version matches exactly. Earlier builds locally identified as `8.29.0.1866`, so if Signal had already persisted `mode = immediately` for that identity after an HTTP 499, changing only the build date would not clear it.
+### What changed
 
-v1.2.0 therefore separates the local and server-facing identities:
+- New local AppVersion identity: **8.29.0.1868**
+- New local BuildDetails timestamp: **22 Sep 2026 17:00 UTC**
+- Hooks SignalServiceKit's pure-Swift `AppExpiryImpl.isExpired` getter to return false.
+- Hooks `setHasAppExpiredAtCurrentVersion(db:)` so an HTTP 499 cannot persist a new "expired at this version" state.
+- Hooks `AppExpiryImpl.appExpiredStatusCode` to return 0.
+- Hooks `RegistrationSession.hasUnknownChallengeRequiringAppUpdate` to return false.
+- Retains small Objective-C expiry fallbacks if those selectors are visible.
 
-- local `CFBundleShortVersionString`: **8.29**
-- local `CFBundleVersion`: **1867**
-- local AppVersion identity: **8.29.0.1867**
-- local BuildDetails timestamp: **22 Sep 2026 13:00 UTC**
-- server-facing User-Agent remains the genuine supplied 8.29 identity: **Signal-iOS/8.29.0.1866 iOS/16.3**
+### Removed from the runtime tweak
 
-The Signal 8.29 commit/Xcode metadata remains from the supplied IPA. The 1867 build number is intentionally local-only; it is used to prevent Signal 7.19.1 from restoring an AppExpiry record cached under 8.29.0.1866.
+- URLSession and request-header hooks
+- User-Agent forcing
+- HTTP 499-to-400 rewriting
+- diagnostic alert modification
+- injection canary popup
+- startup/runtime log files
+- OS-version spoofing
+- runtime NSBundle metadata hooks
 
-No new launch hooks are introduced.
+The package installer still writes the local bundle metadata before Signal launches. Moving from local build **1867** to **1868** prevents Signal 7.19.1 from restoring an AppExpiry record whose stored appVersion exactly matches the previous identity.
+
+This build is intended to answer one question cleanly: whether blocking the actual expiry/update functions is enough without the extra networking and diagnostic machinery.
