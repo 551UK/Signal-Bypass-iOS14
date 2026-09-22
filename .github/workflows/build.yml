@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.4.4-rootful
+          name: SignalBypass14-1.4.5-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,26 +43,27 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental rootful build for Signal on iOS 14.
 
-          v1.4.4 keeps the complete verification-session flow that reaches verified=true.
+          v1.4.4 proved the account-creation stage now succeeds:
+          - verification session completes with verified=true
+          - POST /v1/registration includes spqr=true
+          - POST /v1/registration -> HTTP 200
 
-          The v1.4.3 trace proved the next request, POST /v1/registration, reaches the server with the spoofed Signal 8.29 User-Agent but is rejected with HTTP 499 and:
-          Missing required device capability
+          The next request is PUT /v2/keys. FLEX showed that request still leaves with the old Signal-iOS/7.40.0.1870 iOS/18 User-Agent and receives an empty HTTP 499.
 
-          Current Signal-Server requires the SPQR capability for new device registration. The old client sends a legacy capabilities map without spqr.
+          v1.4.5 keeps the working verification and SPQR registration changes, but broadens the final User-Agent compatibility rewrite to every request whose host is chat.signal.org:
+          Signal-iOS/8.29.0.1866 iOS/16.2
 
-          This build changes only the JSON body of POST /v1/registration:
-          accountAttributes.capabilities.spqr = true
+          This avoids repeating the same remote-deprecation failure on each authenticated Signal service endpoint. It does not rewrite HTTP responses and does not modify /v2/keys data.
 
-          It does not rewrite HTTP statuses or server responses, and it does not alter the verified session ID, auth, account keys, push token, or verification code.
+          The persistent trace now also includes /v2/keys. Large key-upload request bodies are omitted from the log, and access-key fields receive stronger redaction.
 
-          Persistent sanitized logging remains enabled at:
-          Documents/SignalBypass14-Registration.log
+          Log path: Documents/SignalBypass14-Registration.log
 
-          This is a compatibility probe. A final release still needs validation that the old client can safely operate with the capability it advertises.
+          Important: SPQR is still being advertised solely to satisfy current server registration requirements. Long-term protocol compatibility of this old client remains under test.
           NOTES
 
-          gh release create v1.4.4 build/uk.551.signalbypass14_1.4.4_iphoneos-arm.deb \
+          gh release create v1.4.5 build/uk.551.signalbypass14_1.4.5_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.4.4' \
+            --title 'Signal Bypass iOS 14 v1.4.5' \
             --notes-file build/release-notes.md \
             --prerelease
