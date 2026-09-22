@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.4.5-rootful
+          name: SignalBypass14-1.4.6-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -41,29 +41,39 @@ jobs:
         run: |
           set -euo pipefail
           cat > build/release-notes.md <<'NOTES'
-          Experimental rootful build for Signal on iOS 14.
+          Rootful Signal iOS 14 compatibility build.
 
-          v1.4.4 proved the account-creation stage now succeeds:
-          - verification session completes with verified=true
-          - POST /v1/registration includes spqr=true
-          - POST /v1/registration -> HTTP 200
+          IMPORTANT BASELINE:
+          v1.4.5 is preserved unchanged as the known-good clean-login build. v1.4.6 is based directly on that working network/login code.
 
-          The next request is PUT /v2/keys. FLEX showed that request still leaves with the old Signal-iOS/7.40.0.1870 iOS/18 User-Agent and receives an empty HTTP 499.
+          v1.4.6 changes only the local unsupported-iOS reminder UI.
 
-          v1.4.5 keeps the working verification and SPQR registration changes, but broadens the final User-Agent compatibility rewrite to every request whose host is chat.signal.org:
-          Signal-iOS/8.29.0.1866 iOS/16.2
+          Signal 7.19.1 hard-codes:
+          - minimum iOS major version: 15
+          - enforcement date: 2024-10-01 UTC
 
-          This avoids repeating the same remote-deprecation failure on each authenticated Signal service endpoint. It does not rewrite HTTP responses and does not modify /v2/keys data.
+          That produces the banner:
+          "Signal no longer works on this device. To use Signal again, update your device to a newer version of iOS."
 
-          The persistent trace now also includes /v2/keys. Large key-upload request bodies are omitted from the log, and access-key fields receive stronger redaction.
+          The BuildDetails Timestamp controls a separate app-expiry timer (build date + 90 days), so changing Timestamp/DateTime is not the correct fix for this specific iOS-expiry banner.
 
-          Log path: Documents/SignalBypass14-Registration.log
+          This build hooks only Signal.ExpirationNagView's inherited setHidden: and forces that reminder view to remain hidden.
 
-          Important: SPQR is still being advertised solely to satisfy current server registration requirements. Long-term protocol compatibility of this old client remains under test.
+          Unchanged from v1.4.5:
+          - verification/session flow
+          - spqr=true registration compatibility field
+          - POST /v1/registration behavior
+          - PUT /v2/keys behavior
+          - Signal 8.29 User-Agent rewrite on chat.signal.org
+          - BuildDate.m / Info.plist timestamp values
+          - HTTP responses are never rewritten
+
+          Persistent trace remains:
+          Documents/SignalBypass14-Registration.log
           NOTES
 
-          gh release create v1.4.5 build/uk.551.signalbypass14_1.4.5_iphoneos-arm.deb \
+          gh release create v1.4.6 build/uk.551.signalbypass14_1.4.6_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.4.5' \
+            --title 'Signal Bypass iOS 14 v1.4.6' \
             --notes-file build/release-notes.md \
             --prerelease
