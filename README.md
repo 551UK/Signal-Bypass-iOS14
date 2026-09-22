@@ -2,16 +2,20 @@
 
 Experimental rootful compatibility tweak for Signal 7.19.1 (208) on iOS 14.
 
-## Version 1.0.4: crash-safe runtime marker
+## Version 1.1.0: registration path, not injection
 
-v1.0.3 closed Signal immediately because the earliest constructor diagnostic used Foundation objects before the app was ready.
+The v1.0.3 launch change demonstrated that the runtime dylib is loading. The missing Documents file and delayed popup were therefore poor injection tests.
 
-v1.0.4 keeps the same working rootful package baseline but replaces that diagnostic with plain C file I/O only. The first constructor action writes:
+v1.1.0 fixes a more important problem in the constructor: previous builds required both `MSHookMessageEx` and `MSHookFunction`. If the rootful hook provider exposed the message hook but not the function hook, the constructor returned before installing **any** of the expiry, networking or alert hooks.
 
-`SignalBypass14-runtime-marker.txt`
+v1.1.0 now:
 
-to Signal's Documents directory using `open/write/fsync/close`. No Foundation, UIKit, bundle lookups or Objective-C objects are used for that marker.
+- requires only `MSHookMessageEx`, matching the primitive used by the supplied working FuckSignalExpiry tweak
+- installs the Objective-C AppExpiry hooks even if `MSHookFunction` is unavailable
+- keeps the exact 8.29.0.1866 persisted metadata
+- installs the request/User-Agent and HTTP diagnostics regardless of private Swift hook availability
+- attempts the private Swift hooks only when `MSHookFunction` exists
+- removes the process-name restriction from the startup log
+- appends a compact `SB14 v1.1` diagnostic line to the real **Update Required** alert
 
-After installing, fully close Signal, respring, open Signal once, then check Documents for the marker. If it exists, runtime injection is confirmed.
-
-The universal arm64 + arm64e dylib, 0755 permissions, persisted 8.29.0.1866 metadata and existing registration compatibility hooks are otherwise unchanged.
+After installing and respringing, reproduce registration once. If Update Required still appears, send a screenshot of the whole alert; the SB14 line is more useful than a Documents log.
