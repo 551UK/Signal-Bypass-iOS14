@@ -24,7 +24,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.0.2-rootful
+          name: SignalBypass14-1.0.3-rootful
           path: build/*.deb
           if-no-files-found: error
       - name: Publish prerelease
@@ -36,10 +36,10 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental build for Signal 7.19.1 (208), rootful iOS 14.
 
-          Loader-parity build. The known-working FuckSignalExpiry rootful dylib has a direct Mach-O LC_LOAD_DYLIB dependency on /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate and uses a binary MobileSubstrate filter plist. SignalBypass14 previously used runtime dlopen/dlsym and an XML plist.
+          Runtime marker diagnostic build based on the last known-compiling rootful package layout.
 
-          v1.0.2 now directly links CydiaSubstrate, verifies that load command in CI, converts the filter plist to binary form, and retains the already-correct arm64+arm64e slices and 0755 dylib mode.
+          v1.0.3 writes SignalBypass14-runtime-marker.txt directly into Signal's Documents directory as the first action of the dylib constructor, before version checks or hook setup. It also attempts marker writes in the process temporary directory and /tmp.
 
-          The visible "SB14 v1.0.2 loaded" canary remains.
+          This avoids relying on the delayed UIKit popup. The existing arm64+arm64e rootful package, 0755 dylib permissions, launch fix and registration hooks are otherwise unchanged.
           NOTES
-          gh release create v1.0.2 build/uk.551.signalbypass14_1.0.2_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.0.2' --notes-file build/release-notes.md --prerelease
+          gh release create v1.0.3 build/uk.551.signalbypass14_1.0.3_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.0.3' --notes-file build/release-notes.md --prerelease
