@@ -2,12 +2,11 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.5.3: keep the proven registration/expiry baseline and return to the
-// server-supported legacy websocket authentication shape. Current Signal-Server
-// reads websocket credentials from HTTP Basic Authorization; Signal 7.19.1 puts
-// them in login/password query parameters. Convert only that handshake, map the
-// retired ud-chat host to chat.signal.org, apply the proven 8.29/iOS 16.2 UA,
-// and add content-free websocket lifecycle/frame diagnostics.
+// v1.5.4: v1.5.3 proved the websocket handshake is healthy (HTTP 101) and
+// encrypted frames move both directions. Keep that transport/auth baseline and
+// add a minimal parser for Signal's outer websocket protobuf envelope so we can
+// log request method/path + request id and response status only. Bodies,
+// headers, credentials and recipient identifiers remain excluded/redacted.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
@@ -550,6 +549,266 @@ static NSUInteger webSocketMessageSize(NSURLSessionWebSocketMessage *message) {
     return 0;
 }
 
+
+// MARK: - Signal websocket envelope metadata diagnostics
+
+static NSMutableDictionary<NSString *, NSString *> *gWebSocketRequests;
+
+static BOOL wsReadVarint(NSData *data, NSUInteger *offset, uint64_t *valueOut) {
+    if (!data || !offset || !valueOut) return NO;
+
+    const uint8_t *bytes = data.bytes;
+    NSUInteger length = data.length;
+    uint64_t value = 0;
+    unsigned shift = 0;
+
+    while (*offset < length && shift < 64) {
+        uint8_t byte = bytes[(*offset)++];
+        value |= ((uint64_t)(byte & 0x7f)) << shift;
+        if ((byte & 0x80) == 0) {
+            *valueOut = value;
+            return YES;
+        }
+        shift += 7;
+    }
+    return NO;
+}
+
+static BOOL wsReadBytes(NSData *data, NSUInteger *offset, NSData **valueOut) {
+    uint64_t count64 = 0;
+    if (!wsReadVarint(data, offset, &count64)) return NO;
+    if (*offset > data.length) return NO;
+
+    uint64_t remaining = (uint64_t)(data.length - *offset);
+    if (count64 > remaining) return NO;
+
+    NSUInteger count = (NSUInteger)count64;
+    if (valueOut) {
+        *valueOut = [data subdataWithRange:NSMakeRange(*offset, count)];
+    }
+    *offset += count;
+    return YES;
+}
+
+static BOOL wsSkipField(NSData *data, NSUInteger *offset, uint32_t wireType) {
+    switch (wireType) {
+        case 0: {
+            uint64_t ignored = 0;
+            return wsReadVarint(data, offset, &ignored);
+        }
+        case 1:
+            if (*offset > data.length || data.length - *offset < 8) return NO;
+            *offset += 8;
+            return YES;
+        case 2:
+            return wsReadBytes(data, offset, NULL);
+        case 5:
+            if (*offset > data.length || data.length - *offset < 4) return NO;
+            *offset += 4;
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+static NSString *wsString(NSData *data) {
+    if (!data.length) return nil;
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+static NSString *safeWebSocketPath(NSString *path) {
+    if (!path.length) return @"?";
+
+    NSString *clean = [[path componentsSeparatedByString:@"?"] firstObject] ?: path;
+    if ([clean hasPrefix:@"/v1/messages/"]) return @"/v1/messages/<recipient>";
+    if ([clean hasPrefix:@"/v2/keys/"]) return @"/v2/keys/<recipient>";
+    if ([clean hasPrefix:@"/v1/profile/"]) return @"/v1/profile/<recipient>";
+    if ([clean hasPrefix:@"/v1/usernames/"]) return @"/v1/usernames/<id>";
+    return clean;
+}
+
+static NSString *webSocketAuthKind(id taskObject) {
+    if (![taskObject isKindOfClass:NSURLSessionTask.class]) return @"?";
+    NSURLRequest *request = ((NSURLSessionTask *)taskObject).currentRequest ?:
+                            ((NSURLSessionTask *)taskObject).originalRequest;
+    NSString *authorization = [request valueForHTTPHeaderField:@"Authorization"];
+    return authorization.length ? @"auth" : @"anon";
+}
+
+static NSString *wsRequestMapKey(id taskObject, uint64_t requestId) {
+    return [NSString stringWithFormat:@"%p:%llu", taskObject, requestId];
+}
+
+static void rememberWebSocketRequest(id taskObject,
+                                     uint64_t requestId,
+                                     NSString *verb,
+                                     NSString *path) {
+    NSString *summary = [NSString stringWithFormat:@"%@ %@",
+                         verb.length ? verb : @"?",
+                         safeWebSocketPath(path)];
+    NSString *key = wsRequestMapKey(taskObject, requestId);
+
+    @synchronized (NSFileHandle.class) {
+        if (!gWebSocketRequests) gWebSocketRequests = [NSMutableDictionary dictionary];
+        gWebSocketRequests[key] = summary;
+    }
+}
+
+static NSString *takeWebSocketRequest(id taskObject, uint64_t requestId) {
+    NSString *key = wsRequestMapKey(taskObject, requestId);
+    @synchronized (NSFileHandle.class) {
+        NSString *summary = gWebSocketRequests[key];
+        if (summary) [gWebSocketRequests removeObjectForKey:key];
+        return summary;
+    }
+}
+
+static void traceWebSocketRequestProto(NSData *proto,
+                                       NSString *direction,
+                                       id taskObject) {
+    NSUInteger offset = 0;
+    NSString *verb = nil;
+    NSString *path = nil;
+    uint64_t requestId = 0;
+    BOOL hasRequestId = NO;
+
+    while (offset < proto.length) {
+        uint64_t key = 0;
+        if (!wsReadVarint(proto, &offset, &key)) return;
+
+        uint32_t field = (uint32_t)(key >> 3);
+        uint32_t wire = (uint32_t)(key & 7);
+
+        if ((field == 1 || field == 2) && wire == 2) {
+            NSData *bytes = nil;
+            if (!wsReadBytes(proto, &offset, &bytes)) return;
+            NSString *string = wsString(bytes);
+            if (field == 1) verb = string;
+            if (field == 2) path = string;
+            continue;
+        }
+
+        if (field == 4 && wire == 0) {
+            if (!wsReadVarint(proto, &offset, &requestId)) return;
+            hasRequestId = YES;
+            continue;
+        }
+
+        if (!wsSkipField(proto, &offset, wire)) return;
+    }
+
+    if (!hasRequestId) return;
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] WS-PROTO %@ socket=%@ REQUEST id=%llu verb=%@ path=%@",
+        timestamp(),
+        direction ?: @"?",
+        webSocketAuthKind(taskObject),
+        requestId,
+        verb.length ? verb : @"?",
+        safeWebSocketPath(path)]);
+
+    if ([direction isEqualToString:@"OUT"]) {
+        rememberWebSocketRequest(taskObject, requestId, verb, path);
+    }
+}
+
+static void traceWebSocketResponseProto(NSData *proto,
+                                        NSString *direction,
+                                        id taskObject) {
+    NSUInteger offset = 0;
+    uint64_t requestId = 0;
+    uint64_t status = 0;
+    NSUInteger messageBytes = 0;
+    BOOL hasRequestId = NO;
+    BOOL hasStatus = NO;
+
+    while (offset < proto.length) {
+        uint64_t key = 0;
+        if (!wsReadVarint(proto, &offset, &key)) return;
+
+        uint32_t field = (uint32_t)(key >> 3);
+        uint32_t wire = (uint32_t)(key & 7);
+
+        if (field == 1 && wire == 0) {
+            if (!wsReadVarint(proto, &offset, &requestId)) return;
+            hasRequestId = YES;
+            continue;
+        }
+
+        if (field == 2 && wire == 0) {
+            if (!wsReadVarint(proto, &offset, &status)) return;
+            hasStatus = YES;
+            continue;
+        }
+
+        if (field == 3 && wire == 2) {
+            NSData *message = nil;
+            if (!wsReadBytes(proto, &offset, &message)) return;
+            messageBytes = message.length;
+            continue;
+        }
+
+        if (!wsSkipField(proto, &offset, wire)) return;
+    }
+
+    if (!hasRequestId || !hasStatus) return;
+
+    NSString *matched = [direction isEqualToString:@"IN"]
+        ? takeWebSocketRequest(taskObject, requestId)
+        : nil;
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] WS-PROTO %@ socket=%@ RESPONSE id=%llu status=%llu for=%@ messageBytes=%lu",
+        timestamp(),
+        direction ?: @"?",
+        webSocketAuthKind(taskObject),
+        requestId,
+        status,
+        matched.length ? matched : @"<unmatched>",
+        (unsigned long)messageBytes]);
+}
+
+static void traceWebSocketEnvelope(NSData *data,
+                                   NSString *direction,
+                                   id taskObject) {
+    if (!data.length) return;
+
+    NSUInteger offset = 0;
+    uint64_t type = 0;
+    NSData *requestProto = nil;
+    NSData *responseProto = nil;
+
+    while (offset < data.length) {
+        uint64_t key = 0;
+        if (!wsReadVarint(data, &offset, &key)) return;
+
+        uint32_t field = (uint32_t)(key >> 3);
+        uint32_t wire = (uint32_t)(key & 7);
+
+        if (field == 1 && wire == 0) {
+            if (!wsReadVarint(data, &offset, &type)) return;
+            continue;
+        }
+
+        if ((field == 2 || field == 3) && wire == 2) {
+            NSData *nested = nil;
+            if (!wsReadBytes(data, &offset, &nested)) return;
+            if (field == 2) requestProto = nested;
+            if (field == 3) responseProto = nested;
+            continue;
+        }
+
+        if (!wsSkipField(data, &offset, wire)) return;
+    }
+
+    if (type == 1 && requestProto.length) {
+        traceWebSocketRequestProto(requestProto, direction, taskObject);
+    } else if (type == 2 && responseProto.length) {
+        traceWebSocketResponseProto(responseProto, direction, taskObject);
+    }
+}
+
 typedef void (*WebSocketSendMessageFn)(id, SEL, NSURLSessionWebSocketMessage *, void (^)(NSError *));
 typedef void (*WebSocketReceiveMessageFn)(id, SEL, void (^)(NSURLSessionWebSocketMessage *, NSError *));
 
@@ -573,6 +832,9 @@ static void tracedWebSocketSendMessage(id self,
         webSocketTaskTarget(self),
         (unsigned long)size,
         message.type == NSURLSessionWebSocketMessageTypeData ? @"data" : @"string"]);
+    if (message && message.type == NSURLSessionWebSocketMessageTypeData) {
+        traceWebSocketEnvelope(message.data, @"OUT", self);
+    }
 
     void (^wrapped)(NSError *) = ^(NSError *error) {
         appendTrace([NSString stringWithFormat:
@@ -604,6 +866,9 @@ static void tracedWebSocketReceiveMessage(id self,
             (unsigned long)webSocketMessageSize(message),
             message ? (message.type == NSURLSessionWebSocketMessageTypeData ? @"data" : @"string") : @"none",
             error ? [NSString stringWithFormat:@"%@/%ld", error.domain, (long)error.code] : @"none"]);
+        if (message && message.type == NSURLSessionWebSocketMessageTypeData) {
+            traceWebSocketEnvelope(message.data, @"IN", self);
+        }
         if (completion) completion(message, error);
     };
 
@@ -676,7 +941,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.3 only prevents this reminder view from becoming visible; it does
+    // v1.5.4 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -707,7 +972,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.3 websocket trace\nApp: %@ (%@)\niOS: %@\nLegacy websocket: login/password query converted to HTTP Basic, ud-chat mapped to chat, websocket UA=8.29/iOS16.2. Lifecycle and frame-size diagnostics enabled; contents/credentials are not logged.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.4 websocket trace\nApp: %@ (%@)\niOS: %@\nTransport/auth from v1.5.3 retained. Added protobuf envelope metadata: request id/method/redacted path and response status only; bodies, headers, credentials and recipient identifiers are not logged.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",

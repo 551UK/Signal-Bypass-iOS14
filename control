@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.5.3
+Version: 1.5.4
 Architecture: iphoneos-arm
-Description: Legacy websocket Basic-auth compatibility test with safe handshake/frame diagnostics; preserves the working registration and expiry baseline.
+Description: Legacy websocket compatibility with safe protobuf request/status diagnostics; preserves the working registration and expiry baseline.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
