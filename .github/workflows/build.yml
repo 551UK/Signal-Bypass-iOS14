@@ -1,0 +1,21 @@
+name: Build iOS 14 DEB
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install package tools
+        run: brew install ldid dpkg
+      - name: Build and inspect rootful package
+        run: bash scripts/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SignalBypass14-0.1.0-rootful
+          path: build/*.deb
+          if-no-files-found: error
