@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.4.1-rootful
+          name: SignalBypass14-1.4.2-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,20 +43,29 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental rootful build for Signal 7.19.1 (208) on iOS 14.
 
-          v1.4.1 keeps the v1.4.0 final NSURLSession User-Agent rewrite that removed the Update Required popup.
+          v1.4.2 keeps the v1.4.0 final NSURLSession User-Agent rewrite that removed the Update Required popup.
 
-          It adds sanitized logging around the completion-handler registration requests used by Signal 7.19.1. The log records the final request method/path/User-Agent and the real HTTP response status/body for /v1/verification/session requests.
+          Logging is expanded specifically for side-by-side comparison with the successful iOS 16 trace. Every /v1/verification/session request now records:
+          - sequence number
+          - method and redacted path
+          - original User-Agent before rewrite
+          - final User-Agent after rewrite
+          - X-Signal-Agent, Content-Type and Accept-Language
+          - sanitized JSON request body
+          - real HTTP response status
+          - selected response headers
+          - sanitized JSON response body
+          - network error domain/code if present
 
-          Sensitive values including session IDs, phone numbers, push tokens, verification codes, credentials and auth values are redacted.
+          Session IDs, phone numbers, push tokens, verification codes, credentials and auth values are redacted.
 
-          Log path inside Signal's sandbox:
-          Documents/SignalBypass14-Registration.log
+          Log path: Documents/SignalBypass14-Registration.log
 
           No HTTP status rewriting, Swift expiry hooks, X-Signal-Agent injection, request-body modification or diagnostic popups are added.
           NOTES
 
-          gh release create v1.4.1 build/uk.551.signalbypass14_1.4.1_iphoneos-arm.deb \
+          gh release create v1.4.2 build/uk.551.signalbypass14_1.4.2_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.4.1' \
+            --title 'Signal Bypass iOS 14 v1.4.2' \
             --notes-file build/release-notes.md \
             --prerelease
