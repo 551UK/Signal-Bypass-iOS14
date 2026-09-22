@@ -4,6 +4,7 @@
 #import <dlfcn.h>
 #import <sys/utsname.h>
 #import <string.h>
+// v0.9 injection canary compile-fix marker
 
 
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
