@@ -4,34 +4,39 @@
 #import <dlfcn.h>
 #import <sys/utsname.h>
 #import <string.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <stdio.h>
+#import <stdlib.h>
+#import <limits.h>
 // v0.9 injection canary compile-fix marker
 // v0.9 compile trigger 2
 
 
 
 static void writeRuntimeMarker(void) {
-    @autoreleasepool {
-        NSString *home = NSHomeDirectory();
-        NSString *documents = [home stringByAppendingPathComponent:@"Documents"];
-        (void)[NSFileManager.defaultManager createDirectoryAtPath:documents
-                                     withIntermediateDirectories:YES
-                                                      attributes:nil
-                                                           error:nil];
-        NSString *payload = [NSString stringWithFormat:
-            @"SignalBypass14 v1.0.3 runtime constructor loaded\nprocess=%@\npid=%d\nbundle=%@\n",
-            NSProcessInfo.processInfo.processName ?: @"<unknown>",
-            getpid(),
-            NSBundle.mainBundle.bundleIdentifier ?: @"<unknown>"];
-        NSArray<NSString *> *paths = @[
-            [documents stringByAppendingPathComponent:@"SignalBypass14-runtime-marker.txt"],
-            [NSTemporaryDirectory() stringByAppendingPathComponent:@"SignalBypass14-loaded.txt"],
-            @"/tmp/SignalBypass14-loaded.txt"
-        ];
-        for (NSString *path in paths) {
-            NSError *error = nil;
-            [payload writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error];
-        }
+    const char *home = getenv("HOME");
+    if (!home) return;
+
+    char path[PATH_MAX];
+    int length = snprintf(path, sizeof(path), "%s/Documents/SignalBypass14-runtime-marker.txt", home);
+    if (length <= 0 || length >= (int)sizeof(path)) return;
+
+    int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW, 0600);
+    if (fd < 0) return;
+
+    const char *process = getprogname();
+    char payload[256];
+    int payloadLength = snprintf(payload, sizeof(payload),
+        "SignalBypass14 v1.0.4 runtime constructor loaded\nprocess=%s\npid=%d\n",
+        process ? process : "<unknown>", getpid());
+
+    if (payloadLength > 0) {
+        size_t bytes = (size_t)payloadLength < sizeof(payload) ? (size_t)payloadLength : sizeof(payload) - 1;
+        (void)write(fd, payload, bytes);
+        (void)fsync(fd);
     }
+    (void)close(fd);
 }
 
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
@@ -224,7 +229,7 @@ static void showInjectionCanary(void) {
             hookMessage ? @"yes" : @"no",
             hookFunction ? @"yes" : @"no",
             (unsigned long)swiftHookCount];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.0.3 loaded"
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.0.4 loaded"
                                                                         message:message
                                                                  preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:nil]];
@@ -469,6 +474,6 @@ __attribute__((constructor)) static void start(void) {
         install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
         installConcreteHTTPResponseHook();
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v1.0.3 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
+        NSLog(@"[SignalBypass14] v1.0.4 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
     }
 }
