@@ -24,7 +24,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.0.1-rootful
+          name: SignalBypass14-1.0.2-rootful
           path: build/*.deb
           if-no-files-found: error
       - name: Publish prerelease
@@ -36,10 +36,10 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental build for Signal 7.19.1 (208), rootful iOS 14.
 
-          Rootful architecture fix. The supplied FuckSignalExpiry package that previously injected successfully contains both arm64 and arm64e slices. Earlier SignalBypass14 builds contained only arm64, which can prevent MobileSubstrate from loading the dylib into an arm64e Signal process on A12-and-newer devices.
+          Loader-parity build. The known-working FuckSignalExpiry rootful dylib has a direct Mach-O LC_LOAD_DYLIB dependency on /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate and uses a binary MobileSubstrate filter plist. SignalBypass14 previously used runtime dlopen/dlsym and an XML plist.
 
-          v1.0.1 now builds a universal arm64 + arm64e rootful dylib and verifies both slices in CI. The rootful /Library/MobileSubstrate/DynamicLibraries layout and iphoneos-arm package architecture remain unchanged because those already match the known-working reference package.
+          v1.0.2 now directly links CydiaSubstrate, verifies that load command in CI, converts the filter plist to binary form, and retains the already-correct arm64+arm64e slices and 0755 dylib mode.
 
-          The visible "SB14 v1.0.1 loaded" canary remains so injection is obvious.
+          The visible "SB14 v1.0.2 loaded" canary remains.
           NOTES
-          gh release create v1.0.1 build/uk.551.signalbypass14_1.0.1_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.0.1' --notes-file build/release-notes.md --prerelease
+          gh release create v1.0.2 build/uk.551.signalbypass14_1.0.2_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.0.2' --notes-file build/release-notes.md --prerelease

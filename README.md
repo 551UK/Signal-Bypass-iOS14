@@ -2,25 +2,22 @@
 
 Experimental **rootful** compatibility tweak for Signal 7.19.1 (208) on iOS 14.
 
-## Version 1.0.1: fix rootful dylib permissions
+## Version 1.0.2: match the known-working rootful loader format
 
-The previous build still did not inject. The rootful package comparison found the concrete cause in the DEB itself:
+v1.0.1 still did not show the injection canary. A direct Mach-O comparison with the supplied FuckSignalExpiry package found another concrete difference.
 
-- known-working FuckSignalExpiry dylib: **0755**
-- SignalBypass14 v1.0.0 dylib: **0644**
+The known-working tweak has:
 
-The build script was applying `chmod 644` to every file in `/Library/MobileSubstrate/DynamicLibraries`, including the dylib. That is wrong for a rootful MobileSubstrate tweak.
+- arm64 + arm64e
+- dylib mode 0755
+- a binary MobileSubstrate filter plist
+- a direct `LC_LOAD_DYLIB` dependency on `/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate`
 
-v1.0.1 now packages:
+v1.0.2 now mirrors all four of those loader-level properties. CI verifies the Substrate load command before signing and packaging.
 
-- `SignalBypass14.dylib` as **0755**
-- `SignalBypass14.plist` as **0644**
-- universal **arm64 + arm64e** dylib
-- rootful path `/Library/MobileSubstrate/DynamicLibraries`
+No new registration behaviour is guessed in this build. The existing compatibility hooks are retained, and the **SB14 v1.0.2 loaded** popup remains the test for whether the dylib is actually entering Signal.
 
-CI verifies the dylib mode before packaging.
-
-After installing, fully close Signal, respring, then open it and wait about three seconds. You should see **SB14 v1.0.1 loaded**. If that appears, injection is finally confirmed and we can continue with the registration bypass itself.
+Install, fully kill Signal, respring, open Signal and wait about three seconds.
 
 ## Build
 

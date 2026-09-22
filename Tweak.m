@@ -11,6 +11,8 @@
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
+extern void MSHookMessageEx(Class, SEL, IMP, IMP *);
+extern void MSHookFunction(void *, void *, void **);
 static HookMessage hookMessage;
 static HookFunction hookFunction;
 static NSUInteger swiftHookCount;
@@ -198,7 +200,7 @@ static void showInjectionCanary(void) {
             hookMessage ? @"yes" : @"no",
             hookFunction ? @"yes" : @"no",
             (unsigned long)swiftHookCount];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.0.1.1 loaded"
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.0.2 loaded"
                                                                         message:message
                                                                  preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:nil]];
@@ -418,9 +420,8 @@ __attribute__((constructor)) static void start(void) {
             NSLog(@"[SignalBypass14] Inactive: requires iOS 14 with Signal 7.19.1 (208) or its spoofed 8.29 (1866) metadata");
             return;
         }
-        void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
-        hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
-        hookFunction = (HookFunction)dlsym(provider ?: RTLD_DEFAULT, "MSHookFunction");
+        hookMessage = (HookMessage)&MSHookMessageEx;
+        hookFunction = (HookFunction)&MSHookFunction;
         if (!hookMessage || !hookFunction) {
             trace("missing Substrate hook provider: message=%p function=%p", hookMessage, hookFunction);
             NSLog(@"[SignalBypass14] No compatible MSHookMessageEx/MSHookFunction provider");
@@ -442,6 +443,6 @@ __attribute__((constructor)) static void start(void) {
         install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
         installConcreteHTTPResponseHook();
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v1.0.1 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
+        NSLog(@"[SignalBypass14] v1.0.2 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
     }
 }
