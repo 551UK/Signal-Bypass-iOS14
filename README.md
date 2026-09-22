@@ -1,36 +1,31 @@
 # Signal Bypass iOS 14
 
-## Version 1.4.3: continue past verified SMS code
+## Version 1.4.4: required capability test
 
-The v1.4.2 trace proved the complete verification-session flow is now accepted by Signal's server:
+The verification flow is now fully accepted through:
 
-`POST session -> PATCH challenge -> POST /code -> PUT /code -> verified=true`
+`PUT /v1/verification/session/<session>/code -> HTTP 200 -> verified=true`
 
-The next request in Signal's registration coordinator is:
+The next request is:
 
 `POST /v1/registration`
 
-That request creates or re-registers the account using the already-verified session ID.
+v1.4.3 proved that request reaches Signal with the working Signal 8.29 User-Agent but the server returns:
 
-v1.4.3 keeps the working verification-session rewrite unchanged and extends the same final `NSURLSession` User-Agent identity to `/v1/registration`:
+`HTTP 499 - Missing required device capability`
 
-`Signal-iOS/8.29.0.1866 iOS/16.2`
+The old client sends a legacy capabilities map. Current Signal-Server requires **SPQR** for new device registration.
 
-Nothing else in the request is rewritten. In particular, the session ID, authorization, account attributes, prekeys and response status are left as Signal generated them.
+v1.4.4 therefore keeps every working verification change untouched and modifies only the final account-registration JSON:
 
-### Logging
+`accountAttributes.capabilities.spqr = true`
 
-The same log now covers both stages:
+The server response is left genuine and is logged. No HTTP 499 rewriting is used.
 
-- `/v1/verification/session...`
-- `/v1/registration`
+### Important
 
-The log is no longer erased when Signal launches. Each app start adds a **NEW SIGNAL LAUNCH** separator, so a successful attempt is preserved even if Signal restarts.
+This build is a compatibility test, not yet the final public solution. The older app's bundled LibSignalClient predates SPQR support, so even if this clears account creation we still need to validate message protocol compatibility before treating the tweak as finished.
 
-Sensitive values are redacted more aggressively, including the phone number, session ID, push challenge, tokens, auth values, UUID/account identifiers, passwords and cryptographic key/prekey material.
-
-Log location:
+Persistent sanitized log:
 
 `Signal/Documents/SignalBypass14-Registration.log`
-
-The local metadata identity stays at **8.29.0.1870** so this build changes only the next network compatibility stage and diagnostics.
