@@ -104,6 +104,7 @@ static BOOL notExpired(id self, SEL sel) { return NO; }
 static NSUInteger expiryStatusCode(id self, SEL sel) { return 0; }
 
 static void install(Class cls, NSString *name, IMP replacement, IMP *original) {
+    if (!hookMessage) return;
     SEL selector = NSSelectorFromString(name);
     if (cls && class_getInstanceMethod(cls, selector)) {
         hookMessage(cls, selector, replacement, original);
@@ -187,12 +188,15 @@ static void rememberResponse(NSURLResponse *response) {
 static NSString *diagnosticSummary(void) {
     @synchronized (NSURLSession.class) {
         NSString *status = lastHTTPStatus >= 0 ? [NSString stringWithFormat:@"%ld", (long)lastHTTPStatus] : @"none";
-        return [NSString stringWithFormat:@"SB14 v0.8 • swift=%lu • req=%@ • %@ %@ • HTTP %@ • UA=%@",
+        return [NSString stringWithFormat:@"SB14 v1.1 • msg=%@ fn=%@ swift=%lu • req=%@ • %@ %@ • HTTP %@ • raw499=%@ • UA=%@",
+                hookMessage ? @"yes" : @"no",
+                hookFunction ? @"yes" : @"no",
                 (unsigned long)swiftHookCount,
                 sawSignalRequest ? @"yes" : @"no",
                 lastRequestMethod ?: @"none",
                 lastRequestHost ?: @"none",
                 status,
+                sawRemoteExpiry499 ? @"yes" : @"no",
                 lastRequestUA ?: @"none"];
     }
 }
@@ -229,7 +233,7 @@ static void showInjectionCanary(void) {
             hookMessage ? @"yes" : @"no",
             hookFunction ? @"yes" : @"no",
             (unsigned long)swiftHookCount];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.0.4 loaded"
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.1.0 loaded"
                                                                         message:message
                                                                  preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:nil]];
@@ -404,7 +408,7 @@ static void alertViewDidAppear(id self, SEL sel, BOOL animated) {
     UIAlertController *alert = (UIAlertController *)self;
     if (![alert isKindOfClass:UIAlertController.class]) return;
     if (![alert.title containsString:@"Update Required"]) return;
-    if ([alert.message containsString:@"SB14 v0.8"]) return;
+    if ([alert.message containsString:@"SB14 v1.1"]) return;
     NSString *summary = diagnosticSummary();
     alert.message = alert.message.length
         ? [alert.message stringByAppendingFormat:@"\n\n%@", summary]
@@ -428,7 +432,6 @@ static void installConcreteHTTPResponseHook(void) {
 }
 
 __attribute__((constructor)) static void start(void) {
-    writeRuntimeMarker();
     startTrace();
     @autoreleasepool {
         trace("reading app metadata");
@@ -436,8 +439,32 @@ __attribute__((constructor)) static void start(void) {
         NSString *identifier = main.bundleIdentifier;
         if (![@[@"org.whispersystems.signal", @"org.whispersystems.signal.SignalNSE",
                 @"org.whispersystems.signal.shareextension"] containsObject:identifier]) return;
-        showInjectionCanary();
-        // Capture genuine values before installing any hook.
+        // Resolve the message hook first. The original working FuckSignalExpiry
+        // tweak only required MSHookMessageEx; MSHookFunction is optional here.
+        void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
+        hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
+        hookFunction = (HookFunction)dlsym(provider ?: RTLD_DEFAULT, "MSHookFunction");
+        if (!hookMessage) {
+            trace("missing MSHookMessageEx provider");
+            NSLog(@"[SignalBypass14] No compatible MSHookMessageEx provider");
+            return;
+        }
+
+        // Install visible/network diagnostics and the ObjC expiry hooks even when
+        // MSHookFunction is unavailable. Previous builds returned too early here.
+        installStartupDiagnostics();
+        installNetworkIdentityHooks();
+        installDiagnosticAlertHook();
+        installVisibleDiagnosticHook();
+
+
+        if (hookFunction) {
+            installSwiftRegistrationHooks();
+        } else {
+            trace("MSHookFunction unavailable; skipping private Swift symbol hooks");
+        }
+
+        // Capture genuine values after the diagnostic/expiry hooks are installed.
         struct utsname kernel;
         BOOL isIOS14 = uname(&kernel) == 0 && strncmp(kernel.release, "20.", 3) == 0;
         NSString *installedVersion = [main objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
@@ -446,23 +473,8 @@ __attribute__((constructor)) static void start(void) {
         BOOL originalMetadata = [installedVersion isEqualToString:@"7.19.1"] && [installedBuild isEqualToString:@"208"];
         BOOL spoofedMetadata = [installedVersion isEqualToString:@"8.29"] && [installedBuild isEqualToString:@"1866"];
         if (!isIOS14 || (!originalMetadata && !spoofedMetadata)) {
-            trace("inactive: unsupported OS/app version");
-            NSLog(@"[SignalBypass14] Inactive: requires iOS 14 with Signal 7.19.1 (208) or its spoofed 8.29 (1866) metadata");
-            return;
+            trace("version metadata unexpected; diagnostics remain active");
         }
-        void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
-        hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
-        hookFunction = (HookFunction)dlsym(provider ?: RTLD_DEFAULT, "MSHookFunction");
-        if (!hookMessage || !hookFunction) {
-            trace("missing Substrate hook provider: message=%p function=%p", hookMessage, hookFunction);
-            NSLog(@"[SignalBypass14] No compatible MSHookMessageEx/MSHookFunction provider");
-            return;
-        }
-        installStartupDiagnostics();
-        installSwiftRegistrationHooks();
-        installNetworkIdentityHooks();
-        installDiagnosticAlertHook();
-        installVisibleDiagnosticHook();
         trace("NSProcessInfo OS availability retained; forcing current network identity; installing compatibility hooks");
         Class expiryClass = NSClassFromString(@"SignalServiceKit.AppExpiryImpl");
         if (!expiryClass) expiryClass = objc_getClass("_TtC16SignalServiceKit13AppExpiryImpl");
@@ -474,6 +486,6 @@ __attribute__((constructor)) static void start(void) {
         install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
         installConcreteHTTPResponseHook();
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v1.0.4 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
+        NSLog(@"[SignalBypass14] v1.1.0 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
     }
 }
