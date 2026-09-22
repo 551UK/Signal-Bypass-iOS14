@@ -2,23 +2,27 @@
 
 Experimental rootful compatibility tweak for **Signal 7.19.1 (208) on iOS 14**.
 
-## Version 0.7.0: persist the working 8.29 identity
+## Version 0.8.0: hook the registration gate in Swift
 
-The previous builds changed Signal's version mostly at runtime. That left a gap: Signal 7.19.1's `AppVersionImpl` is pure Swift and constructs `currentAppVersion` directly from the app bundle. The registration stack then uses that value when it creates its own User-Agent and expiry state.
+v0.7 still produced the same **Something went wrong → Update Required** sequence. The important source-level finding is that Signal 7.19.1 can produce `.appUpdateBanner` from only two registration conditions:
 
-v0.7.0 therefore applies the version at the source instead of depending on a later Objective-C hook.
+1. `AppExpiry.isExpired`
+2. `RegistrationSession.hasUnknownChallengeRequiringAppUpdate`
 
-On install it backs up the original metadata, then writes the exact values from the supplied working **Signal 8.29 (1866)** IPA:
+Both are pure Swift paths. Earlier builds mainly used Objective-C/Foundation hooks, so they could leave these actual Swift getters untouched.
 
-- `CFBundleShortVersionString = 8.29`
-- `CFBundleVersion = 1866`
-- the matching 8.29 `BuildDetails` timestamp, commit and Xcode version
+v0.8.0 resolves the exported Swift symbols from the exact supplied **Signal 7.19.1 (208)** `SignalServiceKit` binary and hooks them directly with `MSHookFunction`:
 
-The app binary is still Signal 7.19.1 and `MinimumOSVersion` is left at 14.0. The v0.3 launch fix remains unchanged: the NSProcessInfo iOS-10000 spoof is not restored.
+- `AppExpiryImpl.isExpired` → always false
+- the AppExpiry dispatch thunk → always false
+- `setHasAppExpiredAtCurrentVersion(db:)` → no-op
+- its dispatch thunk → no-op
+- `appExpiredStatusCode` → 0
+- `RegistrationSession.hasUnknownChallengeRequiringAppUpdate` → always false
 
-This is intentionally different from v0.4-v0.6: Signal's own Swift version object should now initialize as **8.29.0.1866**, so registration should create the current identity itself rather than us trying to rewrite it later in Foundation.
+The working v0.3 launch change is preserved: the unsafe NSProcessInfo iOS-10000 override is still **not** used. v0.7's exact Signal 8.29.0.1866 persisted version/build metadata is also retained.
 
-Uninstall restores the original 7.19.1 (208) metadata.
+If the Update Required alert still appears, v0.8 appends an `SB14 v0.8` diagnostic line directly to that alert. `swift=6` means all six expected Swift symbols were found and hooked.
 
 ## Install
 

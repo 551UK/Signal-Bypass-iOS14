@@ -24,7 +24,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-0.7.0-rootful
+          name: SignalBypass14-0.8.0-rootful
           path: build/*.deb
           if-no-files-found: error
       - name: Publish prerelease
@@ -36,10 +36,10 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental build for Signal 7.19.1 (208), rootful iOS 14.
 
-          v0.7 changes the version spoof from runtime-only to persisted app metadata.
+          v0.8 targets the two actual pure-Swift sources of RegistrationStep.appUpdateBanner in Signal 7.19.1.
 
-          The supplied Signal 7.19.1 app's Info.plist is now backed up, then its CFBundleShortVersionString, CFBundleVersion and BuildDetails are changed to the exact values from the supplied working Signal 8.29 (1866) IPA. This makes Signal's own Swift AppVersionImpl create 8.29.0.1866 natively instead of depending on Objective-C Bundle hooks.
+          The exact exported Swift symbols from the supplied 7.19.1 SignalServiceKit binary are hooked with MSHookFunction: AppExpiryImpl.isExpired returns false, setHasAppExpiredAtCurrentVersion is suppressed, appExpiredStatusCode returns 0, and RegistrationSession.hasUnknownChallengeRequiringAppUpdate returns false. This is different from earlier Objective-C swizzling and reaches the Swift implementations used by registration.
 
-          The v0.3 launch fix remains: the NSProcessInfo iOS-10000 override is still removed. The concrete networking hooks remain as a second layer. Uninstall restores the original 7.19.1 (208) metadata.
+          The v0.3 launch fix remains and the exact 8.29.0.1866 persisted metadata from v0.7 is retained. If Update Required somehow still appears, the alert now shows an SB14 v0.8 line with the number of Swift symbols hooked plus safe host/status/User-Agent diagnostics.
           NOTES
-          gh release create v0.7.0 build/uk.551.signalbypass14_0.7.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v0.7.0' --notes-file build/release-notes.md --prerelease
+          gh release create v0.8.0 build/uk.551.signalbypass14_0.8.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v0.8.0' --notes-file build/release-notes.md --prerelease

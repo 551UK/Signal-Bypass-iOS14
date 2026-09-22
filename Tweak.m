@@ -7,7 +7,10 @@
 
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
+typedef void (*HookFunction)(void *, void *, void **);
 static HookMessage hookMessage;
+static HookFunction hookFunction;
+static NSUInteger swiftHookCount;
 static NSString *const targetVersion = @"8.29";
 static NSString *const targetBuild = @"1866"; // exact build from the supplied working Signal 8.29 IPA
 static NSString *const targetOS = @"16.3";
@@ -70,6 +73,42 @@ static void install(Class cls, NSString *name, IMP replacement, IMP *original) {
     }
 }
 
+
+static BOOL swiftReturnFalse(void) { return NO; }
+static NSUInteger swiftReturnZero(void) { return 0; }
+static void swiftNoop(void) {}
+
+static BOOL installSwiftHook(const char *symbol, void *replacement) {
+    if (!hookFunction) return NO;
+    void *target = dlsym(RTLD_DEFAULT, symbol);
+    if (!target) {
+        trace("swift symbol missing: %s", symbol);
+        return NO;
+    }
+    hookFunction(target, replacement, NULL);
+    swiftHookCount++;
+    trace("swift hook installed: %s", symbol);
+    return YES;
+}
+
+static void installSwiftRegistrationHooks(void) {
+    // These symbols are exported by the exact SignalServiceKit binary in
+    // Signal 7.19.1 (208). They cover the pure-Swift paths that Objective-C
+    // method swizzling cannot reliably reach.
+    installSwiftHook("$s16SignalServiceKit13AppExpiryImplC9isExpiredSbvg",
+                     (void *)&swiftReturnFalse);
+    installSwiftHook("$s16SignalServiceKit13AppExpiryImplC9isExpiredSbvgTq",
+                     (void *)&swiftReturnFalse);
+    installSwiftHook("$s16SignalServiceKit13AppExpiryImplC06setHasD23ExpiredAtCurrentVersion2dbyAA2DB_p_tF",
+                     (void *)&swiftNoop);
+    installSwiftHook("$s16SignalServiceKit13AppExpiryImplC06setHasD23ExpiredAtCurrentVersion2dbyAA2DB_p_tFTq",
+                     (void *)&swiftNoop);
+    installSwiftHook("$s16SignalServiceKit13AppExpiryImplC20appExpiredStatusCodeSuvgZ",
+                     (void *)&swiftReturnZero);
+    installSwiftHook("$s16SignalServiceKit19RegistrationSessionV37hasUnknownChallengeRequiringAppUpdateSbvg",
+                     (void *)&swiftReturnFalse);
+}
+
 #import "StartupDiagnostics.h"
 
 static BOOL signalServiceHost(NSString *host) {
@@ -113,7 +152,8 @@ static void rememberResponse(NSURLResponse *response) {
 static NSString *diagnosticSummary(void) {
     @synchronized (NSURLSession.class) {
         NSString *status = lastHTTPStatus >= 0 ? [NSString stringWithFormat:@"%ld", (long)lastHTTPStatus] : @"none";
-        return [NSString stringWithFormat:@"SB14 v0.7 • req=%@ • %@ %@ • HTTP %@ • UA=%@",
+        return [NSString stringWithFormat:@"SB14 v0.8 • swift=%lu • req=%@ • %@ %@ • HTTP %@ • UA=%@",
+                (unsigned long)swiftHookCount,
                 sawSignalRequest ? @"yes" : @"no",
                 lastRequestMethod ?: @"none",
                 lastRequestHost ?: @"none",
@@ -282,6 +322,25 @@ static void installDiagnosticAlertHook(void) {
     }
 }
 
+
+static void (*originalAlertViewDidAppear)(id, SEL, BOOL);
+static void alertViewDidAppear(id self, SEL sel, BOOL animated) {
+    originalAlertViewDidAppear(self, sel, animated);
+    UIAlertController *alert = (UIAlertController *)self;
+    if (![alert isKindOfClass:UIAlertController.class]) return;
+    if (![alert.title containsString:@"Update Required"]) return;
+    if ([alert.message containsString:@"SB14 v0.8"]) return;
+    NSString *summary = diagnosticSummary();
+    alert.message = alert.message.length
+        ? [alert.message stringByAppendingFormat:@"\n\n%@", summary]
+        : summary;
+}
+
+static void installVisibleDiagnosticHook(void) {
+    install(UIAlertController.class, @"viewDidAppear:", (IMP)alertViewDidAppear,
+            (IMP *)&originalAlertViewDidAppear);
+}
+
 static void installConcreteHTTPResponseHook(void) {
     NSHTTPURLResponse *probe = [[NSHTTPURLResponse alloc]
         initWithURL:[NSURL URLWithString:@"https://chat.signal.org/"]
@@ -311,19 +370,22 @@ __attribute__((constructor)) static void start(void) {
         BOOL spoofedMetadata = [installedVersion isEqualToString:@"8.29"] && [installedBuild isEqualToString:@"1866"];
         if (!isIOS14 || (!originalMetadata && !spoofedMetadata)) {
             trace("inactive: unsupported OS/app version");
-            NSLog(@"[SignalBypass14] Inactive: requires iOS 14 with Signal 7.19.1 (208) or its v0.7 metadata spoof");
+            NSLog(@"[SignalBypass14] Inactive: requires iOS 14 with Signal 7.19.1 (208) or its spoofed 8.29 (1866) metadata");
             return;
         }
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
         hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
-        if (!hookMessage) {
-            trace("no MSHookMessageEx provider");
-            NSLog(@"[SignalBypass14] No compatible hook provider");
+        hookFunction = (HookFunction)dlsym(provider ?: RTLD_DEFAULT, "MSHookFunction");
+        if (!hookMessage || !hookFunction) {
+            trace("missing Substrate hook provider: message=%p function=%p", hookMessage, hookFunction);
+            NSLog(@"[SignalBypass14] No compatible MSHookMessageEx/MSHookFunction provider");
             return;
         }
         installStartupDiagnostics();
+        installSwiftRegistrationHooks();
         installNetworkIdentityHooks();
         installDiagnosticAlertHook();
+        installVisibleDiagnosticHook();
         trace("NSProcessInfo OS availability retained; forcing current network identity; installing compatibility hooks");
         Class expiryClass = NSClassFromString(@"SignalServiceKit.AppExpiryImpl");
         if (!expiryClass) expiryClass = objc_getClass("_TtC16SignalServiceKit13AppExpiryImpl");
@@ -335,6 +397,6 @@ __attribute__((constructor)) static void start(void) {
         install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
         installConcreteHTTPResponseHook();
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v0.7.0 active; exact 8.29.0.1866 metadata persisted on disk; concrete Foundation hooks retained");
+        NSLog(@"[SignalBypass14] v0.8.0 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
     }
 }
