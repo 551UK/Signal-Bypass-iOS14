@@ -2,12 +2,11 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.4.5: keep the complete verified-session + SPQR account-registration fix.
-// v1.4.4 now gets POST /v1/registration -> HTTP 200. The next request,
-// PUT /v2/keys, is rejected with an empty HTTP 499 because it leaves with the
-// old User-Agent. Apply the proven Signal 8.29 identity to all chat.signal.org
-// service requests, while leaving request bodies/responses untouched except for
-// the already-required spqr=true registration compatibility field.
+// v1.4.6: exact v1.4.5 login/network compatibility baseline plus one local UI fix.
+// Do not change the verified registration, SPQR, /v2/keys, or chat.signal.org UA
+// behavior. Signal 7.19.1 hard-codes iOS 15 as the minimum OS after 2024-10-01;
+// hide only its ExpirationNagView on iOS 14 so the unsupported-iOS banner does
+// not cover the otherwise successfully registered account.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
@@ -379,6 +378,19 @@ static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLReques
     return originalDataRequestCompletion(self, sel, rewritten, wrapped);
 }
 
+
+typedef void (*SetHiddenFn)(id, SEL, BOOL);
+static SetHiddenFn originalExpirationNagSetHidden;
+
+static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
+    // ExpirationNagView is the local reminder used for both app/OS expiry.
+    // v1.4.6 only prevents this reminder view from becoming visible; it does
+    // not spoof UIDevice/iOS globally and does not touch any login/network state.
+    if (originalExpirationNagSetHidden) {
+        originalExpirationNagSetHidden(self, sel, YES);
+    }
+}
+
 static void install(Class cls, SEL selector, IMP replacement, IMP *original) {
     if (!hookMessage || !cls) return;
     if (!class_getInstanceMethod(cls, selector)) return;
@@ -391,7 +403,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.5 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: verification -> POST /v1/registration (spqr=true) -> PUT /v2/keys. UA rewrite scope: all chat.signal.org requests.\nSensitive values are redacted.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.6 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: verification -> POST /v1/registration (spqr=true) -> PUT /v2/keys. UA rewrite scope: all chat.signal.org requests.\nSensitive values are redacted.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
@@ -426,6 +438,21 @@ __attribute__((constructor)) static void start(void) {
                 @selector(dataTaskWithRequest:completionHandler:),
                 (IMP)dataRequestCompletion,
                 (IMP *)&originalDataRequestCompletion);
+
+        // Signal 7.19.1 runtime name confirmed from the actual IPA:
+        // _TtC6Signal17ExpirationNagView / Signal.ExpirationNagView.
+        Class expirationNagClass = NSClassFromString(@"Signal.ExpirationNagView");
+        if (!expirationNagClass) expirationNagClass = NSClassFromString(@"ExpirationNagView");
+
+        if (expirationNagClass && class_getInstanceMethod(expirationNagClass, @selector(setHidden:))) {
+            install(expirationNagClass,
+                    @selector(setHidden:),
+                    (IMP)expirationNagSetHidden,
+                    (IMP *)&originalExpirationNagSetHidden);
+            appendTrace([NSString stringWithFormat:@"OS expiry banner hidden via %@.", NSStringFromClass(expirationNagClass)]);
+        } else {
+            appendTrace(@"ExpirationNagView class not found; banner hook not installed.");
+        }
 
         appendTrace([NSString stringWithFormat:@"Hooks installed on %@.", NSStringFromClass(sessionClass)]);
     }
