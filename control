@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.5.2
+Version: 1.5.3
 Architecture: iphoneos-arm
-Description: v1.5.1 baseline plus a narrow legacy websocket test that preserves Signal 7.19.1 query authentication, maps ud-chat to chat, and updates only the websocket User-Agent.
+Description: Legacy websocket Basic-auth compatibility test with safe handshake/frame diagnostics; preserves the working registration and expiry baseline.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks

@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.2-rootful
+          name: SignalBypass14-1.5.3-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,32 +43,31 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.5.2 keeps the v1.5.1 registration, expiry, and legacy-transport baseline.
+          v1.5.3 follows the v1.5.1 result where outgoing messages still spin with no one-tick.
 
-          Device result from v1.5.1:
-          - outgoing messages return to spinning/no one-tick
-          - the v1.5.0 forced-libsignal path is therefore not retained
+          Current Signal-Server authenticates websocket upgrades from the HTTP
+          Authorization header, while Signal 7.19.1 still places login/password
+          in the websocket URL query. This build converts only that handshake:
+          - login/password query -> HTTP Basic Authorization
+          - retired ud-chat.signal.org -> chat.signal.org
+          - websocket User-Agent -> Signal-iOS/8.29.0.1866 iOS/16.2
 
-          This build tests one narrower legacy websocket combination:
-          - keep Signal 7.19.1's login/password query authentication unchanged
-          - do not convert websocket authentication to HTTP Basic
-          - map retired ud-chat.signal.org to chat.signal.org for the anonymous socket
-          - apply Signal-iOS/8.29.0.1866 iOS/16.2 only to the websocket upgrade
-          - preserve the /v1/websocket/ path and existing session/request headers
+          It also adds content-free websocket diagnostics to the existing
+          Documents/SignalBypass14-Registration.log:
+          - upgrade open/close and HTTP status
+          - NSURL error domain/code
+          - encrypted websocket frame direction and byte count
+          - no message bodies, credentials, recipient IDs, or frame contents
 
           Preserved:
           - Signal 7.19.1 (208) local identity with 2027 BuildDetails
-          - fresh verification/login compatibility
-          - spqr=true registration compatibility
-          - /v1/registration and /v2/keys handling
+          - registration/login, spqr=true and /v2/keys compatibility
           - unsupported-iOS banner suppression
-          - all three libsignal transport preferences reset to false
-
-          No response rewriting, CDSI changes, or forced libsignal transport.
+          - legacy SSK transport with libsignal flags reset to false
           NOTES
 
-          gh release create v1.5.2 build/uk.551.signalbypass14_1.5.2_iphoneos-arm.deb \
+          gh release create v1.5.3 build/uk.551.signalbypass14_1.5.3_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.2' \
+            --title 'Signal Bypass iOS 14 v1.5.3' \
             --notes-file build/release-notes.md \
             --prerelease

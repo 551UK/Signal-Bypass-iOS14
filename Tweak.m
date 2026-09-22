@@ -2,12 +2,12 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.5.2: keep the proven v1.5.1 registration/expiry baseline and make one
-// narrow legacy-websocket compatibility change. Preserve Signal 7.19.1's
-// identified login/password query authentication exactly as the app creates it.
-// Only map retired ud-chat.signal.org to chat.signal.org and apply the proven
-// Signal 8.29/iOS 16.2 User-Agent to the websocket upgrade. No Basic-auth
-// conversion, no libsignal transport forcing, and no response rewriting.
+// v1.5.3: keep the proven registration/expiry baseline and return to the
+// server-supported legacy websocket authentication shape. Current Signal-Server
+// reads websocket credentials from HTTP Basic Authorization; Signal 7.19.1 puts
+// them in login/password query parameters. Convert only that handshake, map the
+// retired ud-chat host to chat.signal.org, apply the proven 8.29/iOS 16.2 UA,
+// and add content-free websocket lifecycle/frame diagnostics.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
@@ -426,28 +426,36 @@ static NSMutableURLRequest *rewriteLegacyChatWebSocket(id sessionObject,
     if (!components) return nil;
 
     NSString *originalHost = components.host.lowercaseString ?: @"";
-
-    // Signal 7.19.1 uses a separate unauthenticated socket host which no longer
-    // resolves. Current clients use the unified chat service, so only remap the
-    // host. Do not alter the path, query authentication, or credentials.
     if ([originalHost isEqualToString:@"ud-chat.signal.org"]) {
         components.host = @"chat.signal.org";
     }
 
-    BOOL hasLogin = NO;
-    BOOL hasPassword = NO;
+    NSString *login = nil;
+    NSString *password = nil;
+    NSMutableArray<NSURLQueryItem *> *remaining = [NSMutableArray array];
+
     for (NSURLQueryItem *item in components.queryItems ?: @[]) {
         NSString *name = item.name.lowercaseString ?: @"";
-        if ([name isEqualToString:@"login"] && item.value.length) hasLogin = YES;
-        if ([name isEqualToString:@"password"] && item.value.length) hasPassword = YES;
+        if ([name isEqualToString:@"login"]) {
+            login = item.value;
+            continue;
+        }
+        if ([name isEqualToString:@"password"]) {
+            password = item.value;
+            continue;
+        }
+        [remaining addObject:item];
     }
+
+    BOOL hadLegacyQueryAuth = login.length || password.length;
+    components.queryItems = remaining.count ? remaining : nil;
 
     NSURL *finalURL = components.URL ?: url;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:finalURL];
     request.HTTPMethod = sourceRequest.HTTPMethod ?: @"GET";
 
-    // Signal's legacy websocket factory places headers on the session
-    // configuration when it creates a task from URL only. Preserve those.
+    // Signal 7.19.1 normally starts its websocket from URL only and stores
+    // headers on the URLSession configuration. Preserve those first.
     copySessionHeaders(sessionObject, request);
 
     for (NSString *key in sourceRequest.allHTTPHeaderFields ?: @{}) {
@@ -457,14 +465,25 @@ static NSMutableURLRequest *rewriteLegacyChatWebSocket(id sessionObject,
         }
     }
 
-    // This identity already works for registration and authenticated key upload.
     [request setValue:workingUserAgent forHTTPHeaderField:@"User-Agent"];
 
+    // Current Signal-Server's WebSocketAccountAuthenticator reads the
+    // Authorization header. Bare UUID remains valid for primary device 1.
+    if (login.length && password.length) {
+        NSString *credentials = [NSString stringWithFormat:@"%@:%@", login, password];
+        NSData *credentialData = [credentials dataUsingEncoding:NSUTF8StringEncoding];
+        NSString *encoded = [credentialData base64EncodedStringWithOptions:0];
+        if (encoded.length) {
+            [request setValue:[@"Basic " stringByAppendingString:encoded]
+           forHTTPHeaderField:@"Authorization"];
+        }
+    }
+
     NSString *authMode = @"anonymous";
-    if (hasLogin && hasPassword) {
-        authMode = @"query-preserved";
-    } else if (hasLogin || hasPassword) {
-        authMode = @"partial-query-preserved";
+    if (login.length && password.length) {
+        authMode = @"query->basic";
+    } else if (hadLegacyQueryAuth) {
+        authMode = @"incomplete-query";
     }
 
     appendTrace([NSString stringWithFormat:
@@ -490,8 +509,6 @@ static NSURLSessionWebSocketTask *webSocketURLTask(id self, SEL sel, NSURL *url)
     if (isLegacyChatWebSocketURL(url) && originalWebSocketRequest) {
         NSMutableURLRequest *rewritten = rewriteLegacyChatWebSocket(self, nil, url);
         if (rewritten) {
-            // Use the request API so the copied session headers and replacement
-            // User-Agent are present on the upgrade. Query auth remains in URL.
             return originalWebSocketRequest(self,
                                             @selector(webSocketTaskWithRequest:),
                                             rewritten);
@@ -501,13 +518,165 @@ static NSURLSessionWebSocketTask *webSocketURLTask(id self, SEL sel, NSURL *url)
     return originalWebSocketURL(self, sel, url);
 }
 
+// MARK: - Websocket diagnostics
+// These hooks record only lifecycle, HTTP status, error domain/code and binary
+// frame sizes. Message bodies, websocket credentials and recipient identifiers
+// are never written to the log.
+
+static NSURL *webSocketTaskURL(NSURLSessionTask *task) {
+    if (!task) return nil;
+    return task.currentRequest.URL ?: task.originalRequest.URL;
+}
+
+static BOOL isSignalChatWebSocketTask(id taskObject) {
+    if (![taskObject isKindOfClass:NSURLSessionWebSocketTask.class]) return NO;
+    return isLegacyChatWebSocketURL(webSocketTaskURL((NSURLSessionTask *)taskObject));
+}
+
+static NSString *webSocketTaskTarget(id taskObject) {
+    NSURL *url = webSocketTaskURL((NSURLSessionTask *)taskObject);
+    if (!url) return @"?";
+    return [NSString stringWithFormat:@"%@%@", url.host ?: @"?", url.path ?: @"/"];
+}
+
+static NSUInteger webSocketMessageSize(NSURLSessionWebSocketMessage *message) {
+    if (!message) return 0;
+    if (message.type == NSURLSessionWebSocketMessageTypeData) {
+        return message.data.length;
+    }
+    if (message.type == NSURLSessionWebSocketMessageTypeString) {
+        return [message.string lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    }
+    return 0;
+}
+
+typedef void (*WebSocketSendMessageFn)(id, SEL, NSURLSessionWebSocketMessage *, void (^)(NSError *));
+typedef void (*WebSocketReceiveMessageFn)(id, SEL, void (^)(NSURLSessionWebSocketMessage *, NSError *));
+
+static WebSocketSendMessageFn originalWebSocketSendMessage;
+static WebSocketReceiveMessageFn originalWebSocketReceiveMessage;
+
+static void tracedWebSocketSendMessage(id self,
+                                       SEL sel,
+                                       NSURLSessionWebSocketMessage *message,
+                                       void (^completion)(NSError *)) {
+    BOOL tracked = isSignalChatWebSocketTask(self);
+    if (!tracked) {
+        originalWebSocketSendMessage(self, sel, message, completion);
+        return;
+    }
+
+    NSUInteger size = webSocketMessageSize(message);
+    appendTrace([NSString stringWithFormat:
+        @"[%@] WS-FRAME OUT target=%@ bytes=%lu type=%@",
+        timestamp(),
+        webSocketTaskTarget(self),
+        (unsigned long)size,
+        message.type == NSURLSessionWebSocketMessageTypeData ? @"data" : @"string"]);
+
+    void (^wrapped)(NSError *) = ^(NSError *error) {
+        appendTrace([NSString stringWithFormat:
+            @"[%@] WS-FRAME OUT-COMPLETE target=%@ error=%@",
+            timestamp(),
+            webSocketTaskTarget(self),
+            error ? [NSString stringWithFormat:@"%@/%ld", error.domain, (long)error.code] : @"none"]);
+        if (completion) completion(error);
+    };
+
+    originalWebSocketSendMessage(self, sel, message, wrapped);
+}
+
+static void tracedWebSocketReceiveMessage(id self,
+                                          SEL sel,
+                                          void (^completion)(NSURLSessionWebSocketMessage *, NSError *)) {
+    BOOL tracked = isSignalChatWebSocketTask(self);
+    if (!tracked) {
+        originalWebSocketReceiveMessage(self, sel, completion);
+        return;
+    }
+
+    void (^wrapped)(NSURLSessionWebSocketMessage *, NSError *) =
+    ^(NSURLSessionWebSocketMessage *message, NSError *error) {
+        appendTrace([NSString stringWithFormat:
+            @"[%@] WS-FRAME IN target=%@ bytes=%lu type=%@ error=%@",
+            timestamp(),
+            webSocketTaskTarget(self),
+            (unsigned long)webSocketMessageSize(message),
+            message ? (message.type == NSURLSessionWebSocketMessageTypeData ? @"data" : @"string") : @"none",
+            error ? [NSString stringWithFormat:@"%@/%ld", error.domain, (long)error.code] : @"none"]);
+        if (completion) completion(message, error);
+    };
+
+    originalWebSocketReceiveMessage(self, sel, wrapped);
+}
+
+typedef void (*OWSWebSocketDidOpenFn)(id, SEL, NSURLSession *, NSURLSessionWebSocketTask *, NSString *);
+typedef void (*OWSWebSocketDidCloseFn)(id, SEL, NSURLSession *, NSURLSessionWebSocketTask *, NSInteger, NSData *);
+typedef void (*OWSTaskDidCompleteFn)(id, SEL, NSURLSession *, NSURLSessionTask *, NSError *);
+
+static OWSWebSocketDidOpenFn originalOWSWebSocketDidOpen;
+static OWSWebSocketDidCloseFn originalOWSWebSocketDidClose;
+static OWSTaskDidCompleteFn originalOWSTaskDidComplete;
+
+static void tracedOWSWebSocketDidOpen(id self,
+                                      SEL sel,
+                                      NSURLSession *session,
+                                      NSURLSessionWebSocketTask *task,
+                                      NSString *protocol) {
+    if (isSignalChatWebSocketTask(task)) {
+        NSInteger status = [task.response isKindOfClass:NSHTTPURLResponse.class]
+            ? ((NSHTTPURLResponse *)task.response).statusCode : -1;
+        appendTrace([NSString stringWithFormat:
+            @"[%@] WS-OPEN target=%@ http=%ld protocol=%@",
+            timestamp(),
+            webSocketTaskTarget(task),
+            (long)status,
+            protocol.length ? protocol : @"<none>"]);
+    }
+    originalOWSWebSocketDidOpen(self, sel, session, task, protocol);
+}
+
+static void tracedOWSWebSocketDidClose(id self,
+                                       SEL sel,
+                                       NSURLSession *session,
+                                       NSURLSessionWebSocketTask *task,
+                                       NSInteger closeCode,
+                                       NSData *reason) {
+    if (isSignalChatWebSocketTask(task)) {
+        appendTrace([NSString stringWithFormat:
+            @"[%@] WS-CLOSE target=%@ code=%ld reasonBytes=%lu",
+            timestamp(),
+            webSocketTaskTarget(task),
+            (long)closeCode,
+            (unsigned long)reason.length]);
+    }
+    originalOWSWebSocketDidClose(self, sel, session, task, closeCode, reason);
+}
+
+static void tracedOWSTaskDidComplete(id self,
+                                     SEL sel,
+                                     NSURLSession *session,
+                                     NSURLSessionTask *task,
+                                     NSError *error) {
+    if (isSignalChatWebSocketTask(task)) {
+        NSInteger status = [task.response isKindOfClass:NSHTTPURLResponse.class]
+            ? ((NSHTTPURLResponse *)task.response).statusCode : -1;
+        appendTrace([NSString stringWithFormat:
+            @"[%@] WS-TASK-COMPLETE target=%@ http=%ld error=%@",
+            timestamp(),
+            webSocketTaskTarget(task),
+            (long)status,
+            error ? [NSString stringWithFormat:@"%@/%ld", error.domain, (long)error.code] : @"none"]);
+    }
+    originalOWSTaskDidComplete(self, sel, session, task, error);
+}
 
 typedef void (*SetHiddenFn)(id, SEL, BOOL);
 static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.1 only prevents this reminder view from becoming visible; it does
+    // v1.5.3 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -538,7 +707,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.2 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: verification -> POST /v1/registration (spqr=true) -> PUT /v2/keys. Legacy websocket test: query auth preserved, ud-chat mapped to chat, websocket UA=8.29/iOS16.2.\nSensitive values are redacted.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.3 websocket trace\nApp: %@ (%@)\niOS: %@\nLegacy websocket: login/password query converted to HTTP Basic, ud-chat mapped to chat, websocket UA=8.29/iOS16.2. Lifecycle and frame-size diagnostics enabled; contents/credentials are not logged.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
@@ -588,6 +757,61 @@ __attribute__((constructor)) static void start(void) {
             @"Legacy websocket hooks: URL=%@ request=%@.",
             originalWebSocketURL ? @"yes" : @"no",
             originalWebSocketRequest ? @"yes" : @"no"]);
+
+        // Hook the concrete NSURLSessionWebSocketTask implementation used on
+        // this OS so we can see whether encrypted frames are actually leaving
+        // and whether any frames come back, without inspecting their contents.
+        NSURLSession *probeSession =
+            [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
+        NSURLSessionWebSocketTask *probeTask =
+            [probeSession webSocketTaskWithURL:[NSURL URLWithString:@"wss://127.0.0.1/"]];
+        Class webSocketTaskClass = [probeTask class];
+
+        install(webSocketTaskClass,
+                NSSelectorFromString(@"sendMessage:completionHandler:"),
+                (IMP)tracedWebSocketSendMessage,
+                (IMP *)&originalWebSocketSendMessage);
+
+        install(webSocketTaskClass,
+                NSSelectorFromString(@"receiveMessageWithCompletionHandler:"),
+                (IMP)tracedWebSocketReceiveMessage,
+                (IMP *)&originalWebSocketReceiveMessage);
+
+        [probeTask cancel];
+        [probeSession invalidateAndCancel];
+
+        // Signal's OWSURLSession receives the websocket delegate callbacks after
+        // its private forwarding box. Hook those callbacks to capture the actual
+        // upgrade status/close reason before Signal reduces them to "spinning".
+        Class owsURLSessionClass = NSClassFromString(@"SignalServiceKit.OWSURLSession");
+        if (!owsURLSessionClass) {
+            owsURLSessionClass = objc_getClass("_TtC16SignalServiceKit13OWSURLSession");
+        }
+
+        install(owsURLSessionClass,
+                NSSelectorFromString(@"URLSession:webSocketTask:didOpenWithProtocol:"),
+                (IMP)tracedOWSWebSocketDidOpen,
+                (IMP *)&originalOWSWebSocketDidOpen);
+
+        install(owsURLSessionClass,
+                NSSelectorFromString(@"URLSession:webSocketTask:didCloseWithCode:reason:"),
+                (IMP)tracedOWSWebSocketDidClose,
+                (IMP *)&originalOWSWebSocketDidClose);
+
+        install(owsURLSessionClass,
+                NSSelectorFromString(@"URLSession:task:didCompleteWithError:"),
+                (IMP)tracedOWSTaskDidComplete,
+                (IMP *)&originalOWSTaskDidComplete);
+
+        appendTrace([NSString stringWithFormat:
+            @"Websocket diagnostics: taskClass=%@ send=%@ receive=%@ ows=%@ open=%@ close=%@ complete=%@.",
+            NSStringFromClass(webSocketTaskClass),
+            originalWebSocketSendMessage ? @"yes" : @"no",
+            originalWebSocketReceiveMessage ? @"yes" : @"no",
+            NSStringFromClass(owsURLSessionClass),
+            originalOWSWebSocketDidOpen ? @"yes" : @"no",
+            originalOWSWebSocketDidClose ? @"yes" : @"no",
+            originalOWSTaskDidComplete ? @"yes" : @"no"]);
 
         // Signal 7.19.1 runtime name confirmed from the actual IPA:
         // _TtC6Signal17ExpirationNagView / Signal.ExpirationNagView.
