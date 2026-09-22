@@ -24,7 +24,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-0.3.0-rootful
+          name: SignalBypass14-0.4.0-rootful
           path: build/*.deb
           if-no-files-found: error
       - name: Publish prerelease
@@ -36,10 +36,10 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental build for Signal 7.19.1 (208), rootful iOS 14.
 
-          Startup diagnostic build. Removes the NSProcessInfo iOS 10000 hook, retains expiry/date and app-version changes, and records startup checkpoints without changing database, keychain or UI state.
+          Registration-focused build based on the v0.3.0 launch-working baseline. Keeps the NSProcessInfo iOS 10000 override removed.
 
-          Fully close Signal, install and respring, open Signal once and leave it for 25 seconds. Send Documents/SignalBypass14-startup.log from Signal's data container using Filza. If it crashes, include its .ips report. No message text, credentials or request bodies are logged.
+          Signal 7.19.1 treats HTTP 499 from the service as an immediate app-expiry signal. This build forces requests to Signal service hosts to use the exact supplied Signal 8.29 network identity (Signal-iOS/8.29.0.1866 iOS/16.3) instead of rewriting a 499 response after the server has already rejected the request.
 
-          Black-screen cause is not yet confirmed. This build is for locating the startup failure; it is not a confirmed fix.
+          The local synthetic build is 8.29.0.1867 so a 499 expiry state persisted by the previous test build is not restored on launch. Startup diagnostics remain enabled.
           NOTES
-          gh release create v0.3.0 build/uk.551.signalbypass14_0.3.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v0.3.0' --notes-file build/release-notes.md --prerelease
+          gh release create v0.4.0 build/uk.551.signalbypass14_0.4.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v0.4.0' --notes-file build/release-notes.md --prerelease

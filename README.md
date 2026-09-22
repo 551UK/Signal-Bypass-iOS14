@@ -1,26 +1,22 @@
 # Signal Bypass iOS 14
 
-Experimental rootful tweak for **Signal 7.19.1 (208) on iOS 14**. Version 0.3.0 focuses on startup diagnostics while retaining the build-date edit and expiry hooks. It is not confirmed to fix the black screen, registration, messaging or calls. The reference setup still reports failed calls.
+Experimental rootful compatibility tweak for **Signal 7.19.1 (208) on iOS 14**.
 
-## Version 0.3.0: black-screen diagnosis
+## Version 0.4.0: registration update-required bypass
 
-Removes the NSProcessInfo iOS 10000 hook introduced in 0.2.0 so OS capability decisions use the real version. This is a potential additional source of trouble, not an established explanation for the original black screen, which was also reported without this tweak.
+This build keeps the **v0.3.0 launch-working baseline**: the unsafe NSProcessInfo iOS 10000 override stays removed, so the change that allowed Signal to open is preserved.
 
-Adds a bounded, per-launch `Documents/SignalBypass14-startup.log` in Signal's data container. The previous run is retained as `SignalBypass14-startup.previous.log`. Records injection, version gate, hook-provider availability, app delegate entry/return, Signal shared-container lookup success, root-controller creation, visible windows and main-thread responsiveness at 2, 8 and 20 seconds. Does not log messages, phone numbers, tokens, request bodies or keychain values. Does not bypass database migrations, reset data, force a root controller, or dismiss a screen lock.
+The next blocker is now source-identified. In Signal 7.19.1, the service can return **HTTP 499**. Signal handles that by calling `setHasAppExpiredAtCurrentVersion`, and the registration coordinator then returns `.appUpdateBanner`. That is the **“Update Required”** alert shown after submitting the phone number.
 
-**Test:** close Signal, install 0.3.0 and respring, open it once and leave it for 25 seconds, then export `SignalBypass14-startup.log` from Signal's data-container Documents folder with Filza. If it exits, also provide the latest Signal `.ips` report. If no log appears, report that explicitly: injection or a failure before the constructor remains possible.
+v0.4.0 targets that point without pretending a rejected 499 response was successful:
 
-The exact 7.19.1 upstream AppDelegate opens the shared database before initializing its main window. MainAppContext force-unwraps the shared-container URL. The supplied IPA carries Signal's original app-group/keychain entitlements; what the installed copy actually retains cannot be established from the archive alone. These are diagnostic leads, not confirmed causes.
+- Requests to Signal service hosts are forced to the exact network identity from the supplied working **Signal 8.29 (1866)** IPA: `Signal-iOS/8.29.0.1866 iOS/16.3`.
+- The local synthetic app build is **8.29.0.1867**. This is intentionally one build different from the network identity so an immediate-expiry state persisted during the previous 8.29.0.1866 test is not restored on the next launch.
+- The 2099 build-date handling, expiry compatibility hooks and startup diagnostics remain.
+- The removed NSProcessInfo iOS 10000 spoof is **not** reintroduced.
+- HTTP 499 is still logged rather than rewritten to 200; changing only the status would leave Signal with an error response body and would not make the SMS request succeed.
 
-Historical 0.2.0 behavior follows below; the iOS 10000 override is removed in 0.3.0.
-
-## Changes in 0.2.0
-
-- Installer sets `BuildDetails.Timestamp` to `4070908800` and `BuildDetails.DateTime` to `Thu Jan 01 00:00:00 UTC 2099` in the installed Signal app's Info.plist. These represent the same UTC date. Runtime bundle hooks report the same values.
-- Adds the supplied FuckSignalExpiry 0.9.0 behavior: `AppExpiryImpl.appExpiredStatusCode` returns 0 and `NSProcessInfo.operatingSystemVersion` reports major version 10000, preserving minor/patch. This changes OS-version decisions inside Signal and may select unsupported code paths; device testing is necessary.
-- Keeps the Signal 8.29 / build 1866 spoof and UIDevice version string 16.3 used for the standard user agent. The two OS APIs intentionally differ to reproduce the reference tweak while retaining the existing network identity.
-- Uses the kernel release for the iOS 14 gate so another NSProcessInfo spoof cannot disable activation.
-- Keeps supplementary Objective-C expiry accessors and bounded HTTP status/host diagnostics. Actual HTTP responses are not rewritten.
+After installing v0.4.0, fully close Signal, respring, reopen it and submit the number again. If the service still rejects registration, `SignalBypass14-startup.log` plus the HTTP status line will tell us whether the request is still receiving 499.
 
 ## Install
 

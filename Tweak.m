@@ -9,8 +9,9 @@
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
 static NSString *const targetVersion = @"8.29";
-static NSString *const targetBuild = @"1866";
+static NSString *const targetBuild = @"1867"; // local-only: invalidates a persisted 499 expiry from v0.3
 static NSString *const targetOS = @"16.3";
+static NSString *const networkUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.3";
 static const NSTimeInterval futureTimestamp = 4070908800.0; // 2099-01-01 UTC
 static id (*originalObject)(id, SEL, NSString *);
 static NSDictionary *(*originalInfo)(id, SEL);
@@ -69,14 +70,88 @@ static void install(Class cls, NSString *name, IMP replacement, IMP *original) {
 
 #import "StartupDiagnostics.h"
 
+static BOOL signalServiceHost(NSString *host) {
+    NSString *lower = host.lowercaseString;
+    return [lower isEqualToString:@"signal.org"] ||
+        [lower hasSuffix:@".signal.org"] ||
+        [lower hasSuffix:@".whispersystems.org"];
+}
+
+static NSURLRequest *latestIdentityRequest(NSURLRequest *request) {
+    if (!request || !signalServiceHost(request.URL.host)) return request;
+    NSMutableURLRequest *copy = [request mutableCopy];
+    [copy setValue:networkUserAgent forHTTPHeaderField:@"User-Agent"];
+    @synchronized (NSURLSession.class) {
+        static NSUInteger count;
+        if (count++ < 24) {
+            NSLog(@"[SignalBypass14] forcing latest Signal identity for %@ %@",
+                  copy.HTTPMethod ?: @"REQUEST", copy.URL.host.lowercaseString);
+        }
+    }
+    return copy;
+}
+
+typedef NSURLSessionDataTask *(*DataTaskRequestFn)(id, SEL, NSURLRequest *);
+typedef NSURLSessionDataTask *(*DataTaskRequestCompletionFn)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+typedef NSURLSessionUploadTask *(*UploadTaskDataFn)(id, SEL, NSURLRequest *, NSData *);
+typedef NSURLSessionUploadTask *(*UploadTaskDataCompletionFn)(id, SEL, NSURLRequest *, NSData *, void (^)(NSData *, NSURLResponse *, NSError *));
+typedef NSURLSessionDownloadTask *(*DownloadTaskRequestFn)(id, SEL, NSURLRequest *);
+typedef NSURLSessionDownloadTask *(*DownloadTaskRequestCompletionFn)(id, SEL, NSURLRequest *, void (^)(NSURL *, NSURLResponse *, NSError *));
+
+static DataTaskRequestFn originalDataTaskRequest;
+static DataTaskRequestCompletionFn originalDataTaskRequestCompletion;
+static UploadTaskDataFn originalUploadTaskData;
+static UploadTaskDataCompletionFn originalUploadTaskDataCompletion;
+static DownloadTaskRequestFn originalDownloadTaskRequest;
+static DownloadTaskRequestCompletionFn originalDownloadTaskRequestCompletion;
+
+static NSURLSessionDataTask *dataTaskRequest(id self, SEL sel, NSURLRequest *request) {
+    return originalDataTaskRequest(self, sel, latestIdentityRequest(request));
+}
+
+static NSURLSessionDataTask *dataTaskRequestCompletion(id self, SEL sel, NSURLRequest *request,
+                                                        void (^completion)(NSData *, NSURLResponse *, NSError *)) {
+    return originalDataTaskRequestCompletion(self, sel, latestIdentityRequest(request), completion);
+}
+
+static NSURLSessionUploadTask *uploadTaskData(id self, SEL sel, NSURLRequest *request, NSData *data) {
+    return originalUploadTaskData(self, sel, latestIdentityRequest(request), data);
+}
+
+static NSURLSessionUploadTask *uploadTaskDataCompletion(id self, SEL sel, NSURLRequest *request, NSData *data,
+                                                        void (^completion)(NSData *, NSURLResponse *, NSError *)) {
+    return originalUploadTaskDataCompletion(self, sel, latestIdentityRequest(request), data, completion);
+}
+
+static NSURLSessionDownloadTask *downloadTaskRequest(id self, SEL sel, NSURLRequest *request) {
+    return originalDownloadTaskRequest(self, sel, latestIdentityRequest(request));
+}
+
+static NSURLSessionDownloadTask *downloadTaskRequestCompletion(id self, SEL sel, NSURLRequest *request,
+                                                                void (^completion)(NSURL *, NSURLResponse *, NSError *)) {
+    return originalDownloadTaskRequestCompletion(self, sel, latestIdentityRequest(request), completion);
+}
+
+static void installNetworkIdentityHooks(void) {
+    // NSURLSession is a class cluster; hook the concrete session class used by iOS.
+    Class sessionClass = [[NSURLSession sharedSession] class];
+    install(sessionClass, @"dataTaskWithRequest:", (IMP)dataTaskRequest, (IMP *)&originalDataTaskRequest);
+    install(sessionClass, @"dataTaskWithRequest:completionHandler:", (IMP)dataTaskRequestCompletion,
+            (IMP *)&originalDataTaskRequestCompletion);
+    install(sessionClass, @"uploadTaskWithRequest:fromData:", (IMP)uploadTaskData, (IMP *)&originalUploadTaskData);
+    install(sessionClass, @"uploadTaskWithRequest:fromData:completionHandler:", (IMP)uploadTaskDataCompletion,
+            (IMP *)&originalUploadTaskDataCompletion);
+    install(sessionClass, @"downloadTaskWithRequest:", (IMP)downloadTaskRequest, (IMP *)&originalDownloadTaskRequest);
+    install(sessionClass, @"downloadTaskWithRequest:completionHandler:", (IMP)downloadTaskRequestCompletion,
+            (IMP *)&originalDownloadTaskRequestCompletion);
+}
+
 static NSInteger (*originalStatus)(id, SEL);
 static NSInteger responseStatus(id self, SEL sel) {
     NSInteger code = originalStatus(self, sel);
     // Host + status only. Never log paths, credentials, phone numbers or bodies.
     NSString *host = [(NSHTTPURLResponse *)self URL].host.lowercaseString;
-    if (code >= 400 && ([host isEqualToString:@"signal.org"] ||
-                       [host hasSuffix:@".signal.org"] ||
-                       [host hasSuffix:@".whispersystems.org"])) {
+    if (code >= 400 && signalServiceHost(host)) {
         @synchronized (NSHTTPURLResponse.class) {
             static NSUInteger count;
             if (count++ < 32) NSLog(@"[SignalBypass14] HTTP %ld from %@", (long)code, host);
@@ -113,7 +188,8 @@ __attribute__((constructor)) static void start(void) {
             return;
         }
         installStartupDiagnostics();
-        trace("NSProcessInfo OS availability retained; installing compatibility hooks");
+        installNetworkIdentityHooks();
+        trace("NSProcessInfo OS availability retained; forcing current network identity; installing compatibility hooks");
         Class expiryClass = NSClassFromString(@"SignalServiceKit.AppExpiryImpl");
         if (!expiryClass) expiryClass = objc_getClass("_TtC16SignalServiceKit13AppExpiryImpl");
         install(object_getClass(expiryClass), @"appExpiredStatusCode", (IMP)expiryStatusCode, NULL);
@@ -124,6 +200,6 @@ __attribute__((constructor)) static void start(void) {
         install(NSClassFromString(@"SignalServiceKit.AppExpiryImpl"), @"isExpired", (IMP)notExpired, NULL);
         install(NSHTTPURLResponse.class, @"statusCode", (IMP)responseStatus, (IMP *)&originalStatus);
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v0.3.0 active; app 8.29.0.1866; expiry hooks; startup diagnostics; build date 2099-01-01");
+        NSLog(@"[SignalBypass14] v0.4.0 active; local app 8.29.0.1867; network app 8.29.0.1866; expiry hooks; startup diagnostics; build date 2099-01-01");
     }
 }
