@@ -5,6 +5,7 @@
 #import <sys/utsname.h>
 #import <string.h>
 // v0.9 injection canary compile-fix marker
+// v0.9 compile trigger 2
 
 
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
