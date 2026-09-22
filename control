@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.0.2
+Version: 1.0.3
 Architecture: iphoneos-arm
-Description: Signal 7.19.1 iOS 14 rootful compatibility matching the known-working Substrate loader format.
+Description: Signal 7.19.1 iOS 14 rootful compatibility with direct runtime injection marker.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
