@@ -37,7 +37,6 @@ static void trace(const char *format, ...) {
 }
 
 static void startTrace(void) {
-    if (strcmp(getprogname(), "Signal")) return;
     const char *home = getenv("HOME");
     if (!home) return;
     char folder[PATH_MAX], path[PATH_MAX], previous[PATH_MAX];
@@ -47,7 +46,7 @@ static void startTrace(void) {
     if (snprintf(previous, sizeof(previous), "%s/SignalBypass14-startup.previous.log", folder) >= (int)sizeof(previous)) return;
     (void)rename(path, previous);
     diagnosticFD = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW, 0600);
-    trace("v0.9.0 injected; process=%s pid=%d", getprogname(), getpid());
+    trace("v1.1.0 injected; process=%s pid=%d", getprogname(), getpid());
 }
 
 static BOOL (*originalDidFinish)(id, SEL, UIApplication *, NSDictionary *);
