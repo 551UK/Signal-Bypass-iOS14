@@ -2,11 +2,11 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.4.8: exact v1.4.6 known-good login/banner baseline plus chat websocket only.
-// Registration, SPQR, /v1/registration, /v2/keys, REST UA handling, and the
-// ExpirationNagView fix are unchanged. This build only modernizes the legacy
-// /v1/websocket/ transport used for normal Signal messaging. No CDSI/contact-
-// discovery experiment is included.
+// v1.4.9: rebuilt directly from the proven v1.4.6 login/banner baseline.
+// No v1.4.7/v1.4.8 websocket experiments are included.
+// The only functional difference is the local bundle build identity/build date
+// applied by BuildDate.m, used to discard any persisted AppExpiry state for the
+// old spoofed build and reproduce the known-working future BuildDetails test.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
@@ -379,141 +379,12 @@ static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLReques
 }
 
 
-typedef NSURLSessionWebSocketTask *(*WebSocketURLFn)(id, SEL, NSURL *);
-typedef NSURLSessionWebSocketTask *(*WebSocketRequestFn)(id, SEL, NSURLRequest *);
-
-static WebSocketURLFn originalWebSocketURL;
-static WebSocketRequestFn originalWebSocketRequest;
-
-static BOOL isLegacyChatWebSocketURL(NSURL *url) {
-    if (!url) return NO;
-    NSString *host = url.host.lowercaseString ?: @"";
-    NSString *path = url.path.lowercaseString ?: @"";
-    BOOL chatHost = [host isEqualToString:@"chat.signal.org"] ||
-                    [host isEqualToString:@"ud-chat.signal.org"];
-    BOOL chatPath = [path isEqualToString:@"/v1/websocket"] ||
-                    [path isEqualToString:@"/v1/websocket/"];
-    return chatHost && chatPath;
-}
-
-static void copySessionHeaders(id sessionObject, NSMutableURLRequest *request) {
-    if (![sessionObject isKindOfClass:NSURLSession.class]) return;
-
-    NSDictionary *headers = ((NSURLSession *)sessionObject).configuration.HTTPAdditionalHeaders;
-    if (![headers isKindOfClass:NSDictionary.class]) return;
-
-    [headers enumerateKeysAndObjectsUsingBlock:^(id keyObject, id valueObject, BOOL *stop) {
-        NSString *key = [keyObject description];
-        NSString *value = [valueObject description];
-        if (key.length && value.length) {
-            [request setValue:value forHTTPHeaderField:key];
-        }
-    }];
-}
-
-static NSMutableURLRequest *modernizeChatWebSocket(id sessionObject,
-                                                    NSURLRequest *sourceRequest,
-                                                    NSURL *sourceURL) {
-    NSURL *url = sourceRequest.URL ?: sourceURL;
-    if (!isLegacyChatWebSocketURL(url)) return nil;
-
-    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
-    if (!components) return nil;
-
-    NSString *originalHost = components.host.lowercaseString ?: @"";
-    // Signal 7.19.1 has a separate anonymous socket at ud-chat.signal.org.
-    // That hostname is retired; current Signal uses the unified chat service.
-    if ([originalHost isEqualToString:@"ud-chat.signal.org"]) {
-        components.host = @"chat.signal.org";
-    }
-
-    NSString *login = nil;
-    NSString *password = nil;
-    NSMutableArray<NSURLQueryItem *> *remaining = [NSMutableArray array];
-
-    for (NSURLQueryItem *item in components.queryItems ?: @[]) {
-        NSString *name = item.name.lowercaseString;
-        if ([name isEqualToString:@"login"]) {
-            login = item.value;
-            continue;
-        }
-        if ([name isEqualToString:@"password"]) {
-            password = item.value;
-            continue;
-        }
-        [remaining addObject:item];
-    }
-
-    BOOL hadLegacyQueryAuth = login.length || password.length;
-    components.queryItems = remaining.count ? remaining : nil;
-
-    NSURL *finalURL = components.URL ?: url;
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:finalURL];
-    request.HTTPMethod = sourceRequest.HTTPMethod ?: @"GET";
-
-    // Old Signal moves websocket headers to URLSessionConfiguration because it
-    // normally creates the task from URL only. Preserve those headers first.
-    copySessionHeaders(sessionObject, request);
-
-    for (NSString *key in sourceRequest.allHTTPHeaderFields ?: @{}) {
-        NSString *value = sourceRequest.allHTTPHeaderFields[key];
-        if (key.length && value.length) {
-            [request setValue:value forHTTPHeaderField:key];
-        }
-    }
-
-    // Use the same server-facing identity that is already proven for the REST
-    // registration/key-upload path.
-    [request setValue:workingUserAgent forHTTPHeaderField:@"User-Agent"];
-
-    // Current Signal-Server authenticates the identified websocket with HTTP
-    // Basic Authorization rather than login/password URL query parameters.
-    if (login.length && password.length) {
-        NSString *credentials = [NSString stringWithFormat:@"%@:%@", login, password];
-        NSData *credentialData = [credentials dataUsingEncoding:NSUTF8StringEncoding];
-        NSString *encoded = [credentialData base64EncodedStringWithOptions:0];
-        if (encoded.length) {
-            [request setValue:[@"Basic " stringByAppendingString:encoded]
-           forHTTPHeaderField:@"Authorization"];
-        }
-    }
-
-    appendTrace([NSString stringWithFormat:
-        @"[%@] CHAT-WEBSOCKET host=%@->%@ path=%@ auth=%@ ua=8.29",
-        timestamp(),
-        originalHost.length ? originalHost : @"?",
-        finalURL.host ?: @"?",
-        finalURL.path ?: @"/",
-        (login.length && password.length) ? @"query->basic" :
-            (hadLegacyQueryAuth ? @"incomplete-query" : @"anonymous")
-    ]);
-
-    return request;
-}
-
-static NSURLSessionWebSocketTask *webSocketRequestTask(id self, SEL sel, NSURLRequest *request) {
-    NSMutableURLRequest *rewritten = modernizeChatWebSocket(self, request, nil);
-    return originalWebSocketRequest(self, sel, rewritten ?: request);
-}
-
-static NSURLSessionWebSocketTask *webSocketURLTask(id self, SEL sel, NSURL *url) {
-    if (isLegacyChatWebSocketURL(url) && originalWebSocketRequest) {
-        NSMutableURLRequest *rewritten = modernizeChatWebSocket(self, nil, url);
-        if (rewritten) {
-            // Build this websocket from a request so the Authorization and
-            // corrected User-Agent headers reach the upgrade request.
-            return originalWebSocketRequest(self, @selector(webSocketTaskWithRequest:), rewritten);
-        }
-    }
-    return originalWebSocketURL(self, sel, url);
-}
-
 typedef void (*SetHiddenFn)(id, SEL, BOOL);
 static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.4.8 only prevents this reminder view from becoming visible; it does
+    // v1.4.9 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -532,7 +403,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.8 registration trace\nApp: %@ (%@)\niOS: %@\nBaseline: v1.4.6 registration/banner behavior preserved. Added chat /v1/websocket/ compatibility only.\nSensitive values are redacted.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.9 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: verification -> POST /v1/registration (spqr=true) -> PUT /v2/keys. UA rewrite scope: all chat.signal.org requests.\nSensitive values are redacted.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
@@ -567,22 +438,6 @@ __attribute__((constructor)) static void start(void) {
                 @selector(dataTaskWithRequest:completionHandler:),
                 (IMP)dataRequestCompletion,
                 (IMP *)&originalDataRequestCompletion);
-
-        install(sessionClass,
-                @selector(webSocketTaskWithRequest:),
-                (IMP)webSocketRequestTask,
-                (IMP *)&originalWebSocketRequest);
-
-        install(sessionClass,
-                @selector(webSocketTaskWithURL:),
-                (IMP)webSocketURLTask,
-                (IMP *)&originalWebSocketURL);
-
-        appendTrace([NSString stringWithFormat:
-            @"Chat websocket hooks: URL=%@ request=%@.",
-            originalWebSocketURL ? @"yes" : @"no",
-            originalWebSocketRequest ? @"yes" : @"no"
-        ]);
 
         // Signal 7.19.1 runtime name confirmed from the actual IPA:
         // _TtC6Signal17ExpirationNagView / Signal.ExpirationNagView.
