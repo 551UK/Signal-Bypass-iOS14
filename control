@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.5.1
+Version: 1.5.2
 Architecture: iphoneos-arm
-Description: v1.4.6 login/banner baseline; explicitly undo v1.5.0 libsignal transport flags and keep Signal 7.19.1 (208) identity with only the 2027 BuildDetails expiry date.
+Description: v1.5.1 baseline plus a narrow legacy websocket test that preserves Signal 7.19.1 query authentication, maps ud-chat to chat, and updates only the websocket User-Agent.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
