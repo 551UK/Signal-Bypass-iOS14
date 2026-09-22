@@ -10,19 +10,19 @@
 // local bundle identity before Signal starts.
 
 static NSString *const spoofShortVersion = @"8.29";
-static NSString *const spoofBuildVersion = @"1870";
+static NSString *const spoofBuildVersion = @"1871";
 static NSString *const originalShortVersion = @"7.19.1";
 static NSString *const originalBuildVersion = @"208";
 
 static BOOL isKnownSpoofBuild(NSString *build) {
-    return [@[@"1866", @"1867", @"1868", @"1869", @"1870"] containsObject:build ?: @""];
+    return [@[@"1866", @"1867", @"1868", @"1869", @"1870", @"1871"] containsObject:build ?: @""];
 }
 
 static NSDictionary *spoofBuildDetails(void) {
     return @{
         @"XCodeVersion": @"2600.2660",
-        @"Timestamp": @1790096400,
-        @"DateTime": @"Tue Sep 22 17:00:00 UTC 2026",
+        @"Timestamp": @1821655572,
+        @"DateTime": @"Wed Sep 22 23:26:12 UTC 2027",
         @"SignalCommit": @"3188f61b17c4b4caa837ab52a0babab5b9fd6423 Feature flags for .production."
     };
 }
@@ -137,12 +137,12 @@ int main(int argc, const char *argv[]) {
                     NSDictionary *check = [NSDictionary dictionaryWithContentsOfFile:path];
                     if (![check[@"CFBundleShortVersionString"] isEqual:spoofShortVersion] ||
                         ![check[@"CFBundleVersion"] isEqual:spoofBuildVersion] ||
-                        [check[@"BuildDetails"][@"Timestamp"] doubleValue] != 1790096400.0) {
+                        [check[@"BuildDetails"][@"Timestamp"] doubleValue] != 1821655572.0) {
                         fputs("SignalBypass14: metadata verification failed.\n", stderr);
                         return 1;
                     }
 
-                    puts("SignalBypass14: persisted fresh local Signal identity 8.29.0.1870.");
+                    puts("SignalBypass14: persisted fresh local Signal identity 8.29.0.1871 with 2027 BuildDetails.");
                 }
             }
         }
