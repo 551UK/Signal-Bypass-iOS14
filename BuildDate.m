@@ -4,18 +4,18 @@
 #import <stdio.h>
 #import <string.h>
 
-// v1.4.0 uses a new local AppVersion identity so an AppExpiry record cached
+// v1.4.1 uses a new local AppVersion identity so an AppExpiry record cached
 // under the previous 8.29.0.1867 identity cannot be restored on first launch.
 // Runtime code no longer intercepts networking; this helper only persists the
 // local bundle identity before Signal starts.
 
 static NSString *const spoofShortVersion = @"8.29";
-static NSString *const spoofBuildVersion = @"1869";
+static NSString *const spoofBuildVersion = @"1870";
 static NSString *const originalShortVersion = @"7.19.1";
 static NSString *const originalBuildVersion = @"208";
 
 static BOOL isKnownSpoofBuild(NSString *build) {
-    return [@[@"1866", @"1867", @"1868", @"1869"] containsObject:build ?: @""];
+    return [@[@"1866", @"1867", @"1868", @"1869", @"1870"] containsObject:build ?: @""];
 }
 
 static NSDictionary *spoofBuildDetails(void) {
@@ -142,7 +142,7 @@ int main(int argc, const char *argv[]) {
                         return 1;
                     }
 
-                    puts("SignalBypass14: persisted fresh local Signal identity 8.29.0.1869.");
+                    puts("SignalBypass14: persisted fresh local Signal identity 8.29.0.1870.");
                 }
             }
         }
