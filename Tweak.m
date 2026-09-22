@@ -9,7 +9,7 @@
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
 static NSString *const targetVersion = @"8.29";
-static NSString *const targetBuild = @"1868"; // local-only: isolates persisted remote-expiry state from earlier tests
+static NSString *const targetBuild = @"1869"; // local-only: isolates persisted remote-expiry state from earlier tests
 static NSString *const targetOS = @"16.3";
 static NSString *const networkUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.3";
 static const NSTimeInterval futureTimestamp = 4070908800.0; // 2099-01-01 UTC
@@ -77,6 +77,49 @@ static BOOL signalServiceHost(NSString *host) {
         [lower hasSuffix:@".whispersystems.org"];
 }
 
+static NSString *lastRequestHost;
+static NSString *lastRequestMethod;
+static NSString *lastRequestUA;
+static NSInteger lastHTTPStatus = -1;
+static BOOL sawSignalRequest;
+static BOOL sawRemoteExpiry499;
+
+static void rememberRequest(NSURLRequest *request) {
+    if (!request || !signalServiceHost(request.URL.host)) return;
+    @synchronized (NSURLSession.class) {
+        sawSignalRequest = YES;
+        lastRequestHost = [request.URL.host.lowercaseString copy];
+        lastRequestMethod = [(request.HTTPMethod ?: @"REQUEST") copy];
+        lastRequestUA = [[request valueForHTTPHeaderField:@"User-Agent"] ?: @"<none>" copy];
+    }
+}
+
+static void rememberResponse(NSURLResponse *response) {
+    if (![response isKindOfClass:NSHTTPURLResponse.class]) return;
+    NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+    NSString *host = http.URL.host.lowercaseString;
+    if (!signalServiceHost(host)) return;
+    NSInteger status = http.statusCode;
+    @synchronized (NSURLSession.class) {
+        lastRequestHost = [host copy];
+        if (!(sawRemoteExpiry499 && status == 400)) {
+            lastHTTPStatus = status;
+        }
+    }
+}
+
+static NSString *diagnosticSummary(void) {
+    @synchronized (NSURLSession.class) {
+        NSString *status = lastHTTPStatus >= 0 ? [NSString stringWithFormat:@"%ld", (long)lastHTTPStatus] : @"none";
+        return [NSString stringWithFormat:@"SB14 v0.6 • req=%@ • %@ %@ • HTTP %@ • UA=%@",
+                sawSignalRequest ? @"yes" : @"no",
+                lastRequestMethod ?: @"none",
+                lastRequestHost ?: @"none",
+                status,
+                lastRequestUA ?: @"none"];
+    }
+}
+
 static void (*originalSetHeaderValue)(id, SEL, NSString *, NSString *);
 static void setHeaderValue(id self, SEL sel, NSString *value, NSString *field) {
     if ([field caseInsensitiveCompare:@"User-Agent"] == NSOrderedSame &&
@@ -101,6 +144,7 @@ static NSURLRequest *latestIdentityRequest(NSURLRequest *request) {
     NSString *before = [copy valueForHTTPHeaderField:@"User-Agent"] ?: @"<none>";
     [copy setValue:networkUserAgent forHTTPHeaderField:@"User-Agent"];
     NSString *after = [copy valueForHTTPHeaderField:@"User-Agent"] ?: @"<none>";
+    rememberRequest(copy);
     @synchronized (NSURLSession.class) {
         static NSUInteger count;
         if (count++ < 32) {
@@ -135,7 +179,12 @@ static NSURLSessionDataTask *dataTaskRequest(id self, SEL sel, NSURLRequest *req
 
 static NSURLSessionDataTask *dataTaskRequestCompletion(id self, SEL sel, NSURLRequest *request,
                                                         void (^completion)(NSData *, NSURLResponse *, NSError *)) {
-    return originalDataTaskRequestCompletion(self, sel, latestIdentityRequest(request), completion);
+    NSURLRequest *updated = latestIdentityRequest(request);
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        rememberResponse(response);
+        if (completion) completion(data, response, error);
+    };
+    return originalDataTaskRequestCompletion(self, sel, updated, wrapped);
 }
 
 static NSURLSessionUploadTask *uploadTaskData(id self, SEL sel, NSURLRequest *request, NSData *data) {
@@ -144,7 +193,12 @@ static NSURLSessionUploadTask *uploadTaskData(id self, SEL sel, NSURLRequest *re
 
 static NSURLSessionUploadTask *uploadTaskDataCompletion(id self, SEL sel, NSURLRequest *request, NSData *data,
                                                         void (^completion)(NSData *, NSURLResponse *, NSError *)) {
-    return originalUploadTaskDataCompletion(self, sel, latestIdentityRequest(request), data, completion);
+    NSURLRequest *updated = latestIdentityRequest(request);
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *responseData, NSURLResponse *response, NSError *error) {
+        rememberResponse(response);
+        if (completion) completion(responseData, response, error);
+    };
+    return originalUploadTaskDataCompletion(self, sel, updated, data, wrapped);
 }
 
 static NSURLSessionDownloadTask *downloadTaskRequest(id self, SEL sel, NSURLRequest *request) {
@@ -157,12 +211,15 @@ static NSURLSessionDownloadTask *downloadTaskRequestCompletion(id self, SEL sel,
 }
 
 static void installNetworkIdentityHooks(void) {
-    // Catch the header while Signal builds its URLRequest, then catch it again at task creation.
-    install(NSMutableURLRequest.class, @"setValue:forHTTPHeaderField:", (IMP)setHeaderValue, (IMP *)&originalSetHeaderValue);
-    install(NSMutableURLRequest.class, @"addValue:forHTTPHeaderField:", (IMP)addHeaderValue, (IMP *)&originalAddHeaderValue);
+    // Foundation uses class clusters. Hook their concrete iOS 14 implementations,
+    // not only the public abstract classes.
+    NSMutableURLRequest *probeRequest = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://chat.signal.org/"]];
+    Class requestClass = object_getClass(probeRequest);
+    install(requestClass, @"setValue:forHTTPHeaderField:", (IMP)setHeaderValue, (IMP *)&originalSetHeaderValue);
+    install(requestClass, @"addValue:forHTTPHeaderField:", (IMP)addHeaderValue, (IMP *)&originalAddHeaderValue);
 
-    // NSURLSession is a class cluster; hook the concrete session class used by iOS.
-    Class sessionClass = [[NSURLSession sharedSession] class];
+    NSURLSession *probeSession = NSURLSession.sharedSession;
+    Class sessionClass = object_getClass(probeSession);
     install(sessionClass, @"dataTaskWithRequest:", (IMP)dataTaskRequest, (IMP *)&originalDataTaskRequest);
     install(sessionClass, @"dataTaskWithRequest:completionHandler:", (IMP)dataTaskRequestCompletion,
             (IMP *)&originalDataTaskRequestCompletion);
@@ -172,6 +229,9 @@ static void installNetworkIdentityHooks(void) {
     install(sessionClass, @"downloadTaskWithRequest:", (IMP)downloadTaskRequest, (IMP *)&originalDownloadTaskRequest);
     install(sessionClass, @"downloadTaskWithRequest:completionHandler:", (IMP)downloadTaskRequestCompletion,
             (IMP *)&originalDownloadTaskRequestCompletion);
+
+    trace("network hooks requestClass=%s sessionClass=%s",
+          class_getName(requestClass), class_getName(sessionClass));
 }
 
 static NSInteger (*originalStatus)(id, SEL);
@@ -186,6 +246,9 @@ static NSInteger responseStatus(id self, SEL sel) {
                 trace("response host=%s status=%ld", (host ?: @"<none>").UTF8String, (long)code);
                 NSLog(@"[SignalBypass14] HTTP %ld from %@", (long)code, host);
             }
+            lastRequestHost = [host copy];
+            lastHTTPStatus = code;
+            if (code == 499) sawRemoteExpiry499 = YES;
         }
         if (code == 499) {
             // Signal 7.19 treats 499 as an instruction to permanently expire this local app version.
@@ -195,6 +258,37 @@ static NSInteger responseStatus(id self, SEL sel) {
         }
     }
     return code;
+}
+
+typedef id (*AlertFactoryFn)(id, SEL, NSString *, NSString *, UIAlertControllerStyle);
+static AlertFactoryFn originalAlertFactory;
+static id diagnosticAlertFactory(id self, SEL sel, NSString *title, NSString *message, UIAlertControllerStyle style) {
+    BOOL relevant = [title containsString:@"Update Required"] ||
+        [message containsString:@"Something went wrong"];
+    if (relevant) {
+        NSString *summary = diagnosticSummary();
+        message = message.length ? [message stringByAppendingFormat:@"\n\n%@", summary] : summary;
+    }
+    return originalAlertFactory(self, sel, title, message, style);
+}
+
+static void installDiagnosticAlertHook(void) {
+    Class meta = object_getClass(UIAlertController.class);
+    SEL selector = @selector(alertControllerWithTitle:message:preferredStyle:);
+    if (meta && class_getInstanceMethod(meta, selector)) {
+        hookMessage(meta, selector, (IMP)diagnosticAlertFactory, (IMP *)&originalAlertFactory);
+    }
+}
+
+static void installConcreteHTTPResponseHook(void) {
+    NSHTTPURLResponse *probe = [[NSHTTPURLResponse alloc]
+        initWithURL:[NSURL URLWithString:@"https://chat.signal.org/"]
+        statusCode:499
+        HTTPVersion:@"HTTP/1.1"
+        headerFields:@{}];
+    Class responseClass = object_getClass(probe);
+    install(responseClass, @"statusCode", (IMP)responseStatus, (IMP *)&originalStatus);
+    trace("response hook class=%s", class_getName(responseClass));
 }
 
 __attribute__((constructor)) static void start(void) {
@@ -226,6 +320,7 @@ __attribute__((constructor)) static void start(void) {
         }
         installStartupDiagnostics();
         installNetworkIdentityHooks();
+        installDiagnosticAlertHook();
         trace("NSProcessInfo OS availability retained; forcing current network identity; installing compatibility hooks");
         Class expiryClass = NSClassFromString(@"SignalServiceKit.AppExpiryImpl");
         if (!expiryClass) expiryClass = objc_getClass("_TtC16SignalServiceKit13AppExpiryImpl");
@@ -235,8 +330,8 @@ __attribute__((constructor)) static void start(void) {
         install(UIDevice.class, @"systemVersion", (IMP)deviceVersion, NULL);
         install(NSClassFromString(@"AppExpiry"), @"isExpired", (IMP)notExpired, NULL);
         install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
-        install(NSHTTPURLResponse.class, @"statusCode", (IMP)responseStatus, (IMP *)&originalStatus);
+        installConcreteHTTPResponseHook();
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v0.5.0 active; local app 8.29.0.1868; network app 8.29.0.1866; 499 remains an error but no longer triggers the update lock; build date 2099-01-01");
+        NSLog(@"[SignalBypass14] v0.6.0 active; local app 8.29.0.1869; concrete Foundation hooks + on-screen registration diagnostics; build date 2099-01-01");
     }
 }
