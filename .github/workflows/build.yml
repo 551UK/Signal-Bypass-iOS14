@@ -24,7 +24,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-0.4.0-rootful
+          name: SignalBypass14-0.5.0-rootful
           path: build/*.deb
           if-no-files-found: error
       - name: Publish prerelease
@@ -36,10 +36,10 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental build for Signal 7.19.1 (208), rootful iOS 14.
 
-          Registration-focused build based on the v0.3.0 launch-working baseline. Keeps the NSProcessInfo iOS 10000 override removed.
+          Follow-up to the registration result where a generic error is immediately followed by Update Required.
 
-          Signal 7.19.1 treats HTTP 499 from the service as an immediate app-expiry signal. This build forces requests to Signal service hosts to use the exact supplied Signal 8.29 network identity (Signal-iOS/8.29.0.1866 iOS/16.3) instead of rewriting a 499 response after the server has already rejected the request.
+          Keeps the v0.3.0 launch-working baseline and the unsafe NSProcessInfo iOS 10000 override removed. Forces the exact supplied Signal 8.29.0.1866 network identity both while request headers are written and at NSURLSession task creation.
 
-          The local synthetic build is 8.29.0.1867 so a 499 expiry state persisted by the previous test build is not restored on launch. Startup diagnostics remain enabled.
+          Local synthetic build is 8.29.0.1868 to isolate earlier persisted expiry state. HTTP 499 remains an error, but is exposed to Signal 7.19.1 as 400 so it cannot persist another app-expiry lock. The log records only host/status and User-Agent, never phone numbers or request bodies.
           NOTES
-          gh release create v0.4.0 build/uk.551.signalbypass14_0.4.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v0.4.0' --notes-file build/release-notes.md --prerelease
+          gh release create v0.5.0 build/uk.551.signalbypass14_0.5.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v0.5.0' --notes-file build/release-notes.md --prerelease

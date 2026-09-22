@@ -24,6 +24,6 @@ cp build/SignalBypass14.dylib SignalBypass14.plist package/Library/MobileSubstra
 cp control package/DEBIAN/control
 chmod 755 package package/DEBIAN package/Library package/Library/MobileSubstrate package/Library/MobileSubstrate/DynamicLibraries
 chmod 644 package/DEBIAN/control package/Library/MobileSubstrate/DynamicLibraries/*
-dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_0.4.0_iphoneos-arm.deb
+dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_0.5.0_iphoneos-arm.deb
 dpkg-deb --info build/*.deb
 dpkg-deb --contents build/*.deb

@@ -9,7 +9,7 @@
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
 static NSString *const targetVersion = @"8.29";
-static NSString *const targetBuild = @"1867"; // local-only: invalidates a persisted 499 expiry from v0.3
+static NSString *const targetBuild = @"1868"; // local-only: isolates persisted remote-expiry state from earlier tests
 static NSString *const targetOS = @"16.3";
 static NSString *const networkUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.3";
 static const NSTimeInterval futureTimestamp = 4070908800.0; // 2099-01-01 UTC
@@ -77,13 +77,37 @@ static BOOL signalServiceHost(NSString *host) {
         [lower hasSuffix:@".whispersystems.org"];
 }
 
+static void (*originalSetHeaderValue)(id, SEL, NSString *, NSString *);
+static void setHeaderValue(id self, SEL sel, NSString *value, NSString *field) {
+    if ([field caseInsensitiveCompare:@"User-Agent"] == NSOrderedSame &&
+        [value hasPrefix:@"Signal-iOS/"]) {
+        value = networkUserAgent;
+    }
+    originalSetHeaderValue(self, sel, value, field);
+}
+
+static void (*originalAddHeaderValue)(id, SEL, NSString *, NSString *);
+static void addHeaderValue(id self, SEL sel, NSString *value, NSString *field) {
+    if ([field caseInsensitiveCompare:@"User-Agent"] == NSOrderedSame &&
+        [value hasPrefix:@"Signal-iOS/"]) {
+        value = networkUserAgent;
+    }
+    originalAddHeaderValue(self, sel, value, field);
+}
+
 static NSURLRequest *latestIdentityRequest(NSURLRequest *request) {
     if (!request || !signalServiceHost(request.URL.host)) return request;
     NSMutableURLRequest *copy = [request mutableCopy];
+    NSString *before = [copy valueForHTTPHeaderField:@"User-Agent"] ?: @"<none>";
     [copy setValue:networkUserAgent forHTTPHeaderField:@"User-Agent"];
+    NSString *after = [copy valueForHTTPHeaderField:@"User-Agent"] ?: @"<none>";
     @synchronized (NSURLSession.class) {
         static NSUInteger count;
-        if (count++ < 24) {
+        if (count++ < 32) {
+            trace("request method=%s host=%s ua_before=%s ua_after=%s",
+                  (copy.HTTPMethod ?: @"REQUEST").UTF8String,
+                  (copy.URL.host.lowercaseString ?: @"<none>").UTF8String,
+                  before.UTF8String, after.UTF8String);
             NSLog(@"[SignalBypass14] forcing latest Signal identity for %@ %@",
                   copy.HTTPMethod ?: @"REQUEST", copy.URL.host.lowercaseString);
         }
@@ -133,6 +157,10 @@ static NSURLSessionDownloadTask *downloadTaskRequestCompletion(id self, SEL sel,
 }
 
 static void installNetworkIdentityHooks(void) {
+    // Catch the header while Signal builds its URLRequest, then catch it again at task creation.
+    install(NSMutableURLRequest.class, @"setValue:forHTTPHeaderField:", (IMP)setHeaderValue, (IMP *)&originalSetHeaderValue);
+    install(NSMutableURLRequest.class, @"addValue:forHTTPHeaderField:", (IMP)addHeaderValue, (IMP *)&originalAddHeaderValue);
+
     // NSURLSession is a class cluster; hook the concrete session class used by iOS.
     Class sessionClass = [[NSURLSession sharedSession] class];
     install(sessionClass, @"dataTaskWithRequest:", (IMP)dataTaskRequest, (IMP *)&originalDataTaskRequest);
@@ -154,7 +182,16 @@ static NSInteger responseStatus(id self, SEL sel) {
     if (code >= 400 && signalServiceHost(host)) {
         @synchronized (NSHTTPURLResponse.class) {
             static NSUInteger count;
-            if (count++ < 32) NSLog(@"[SignalBypass14] HTTP %ld from %@", (long)code, host);
+            if (count++ < 48) {
+                trace("response host=%s status=%ld", (host ?: @"<none>").UTF8String, (long)code);
+                NSLog(@"[SignalBypass14] HTTP %ld from %@", (long)code, host);
+            }
+        }
+        if (code == 499) {
+            // Signal 7.19 treats 499 as an instruction to permanently expire this local app version.
+            // Do not fake a success: preserve an error response, but prevent the secondary update lockout.
+            trace("remote-expiry 499 masked as 400 so registration remains retryable");
+            return 400;
         }
     }
     return code;
@@ -197,9 +234,9 @@ __attribute__((constructor)) static void start(void) {
         install(NSBundle.class, @"infoDictionary", (IMP)bundleInfo, (IMP *)&originalInfo);
         install(UIDevice.class, @"systemVersion", (IMP)deviceVersion, NULL);
         install(NSClassFromString(@"AppExpiry"), @"isExpired", (IMP)notExpired, NULL);
-        install(NSClassFromString(@"SignalServiceKit.AppExpiryImpl"), @"isExpired", (IMP)notExpired, NULL);
+        install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
         install(NSHTTPURLResponse.class, @"statusCode", (IMP)responseStatus, (IMP *)&originalStatus);
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v0.4.0 active; local app 8.29.0.1867; network app 8.29.0.1866; expiry hooks; startup diagnostics; build date 2099-01-01");
+        NSLog(@"[SignalBypass14] v0.5.0 active; local app 8.29.0.1868; network app 8.29.0.1866; 499 remains an error but no longer triggers the update lock; build date 2099-01-01");
     }
 }

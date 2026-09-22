@@ -2,21 +2,21 @@
 
 Experimental rootful compatibility tweak for **Signal 7.19.1 (208) on iOS 14**.
 
-## Version 0.4.0: registration update-required bypass
+## Version 0.5.0: registration 499 follow-up
 
-This build keeps the **v0.3.0 launch-working baseline**: the unsafe NSProcessInfo iOS 10000 override stays removed, so the change that allowed Signal to open is preserved.
+The v0.4.0 device result is useful: registration first shows **“Something went wrong”**, and only after dismissing it does Signal show **“Update Required.”** That matches Signal 7.19.1's source path for a service error such as HTTP 499: the registration request maps the unknown status to a generic error, while Signal separately marks the app version as remotely expired. On the next registration step, `appExpiry.isExpired` produces the update banner.
 
-The next blocker is now source-identified. In Signal 7.19.1, the service can return **HTTP 499**. Signal handles that by calling `setHasAppExpiredAtCurrentVersion`, and the registration coordinator then returns `.appUpdateBanner`. That is the **“Update Required”** alert shown after submitting the phone number.
+v0.5.0 keeps the **v0.3.0 launch-working baseline** and does not restore the NSProcessInfo iOS-10000 hook.
 
-v0.4.0 targets that point without pretending a rejected 499 response was successful:
+Changes:
 
-- Requests to Signal service hosts are forced to the exact network identity from the supplied working **Signal 8.29 (1866)** IPA: `Signal-iOS/8.29.0.1866 iOS/16.3`.
-- The local synthetic app build is **8.29.0.1867**. This is intentionally one build different from the network identity so an immediate-expiry state persisted during the previous 8.29.0.1866 test is not restored on the next launch.
-- The 2099 build-date handling, expiry compatibility hooks and startup diagnostics remain.
-- The removed NSProcessInfo iOS 10000 spoof is **not** reintroduced.
-- HTTP 499 is still logged rather than rewritten to 200; changing only the status would leave Signal with an error response body and would not make the SMS request succeed.
+- Uses local synthetic build **8.29.0.1868**, isolating it from remote-expiry state persisted by the 1866/1867 test builds.
+- Forces the exact supplied working 8.29 network identity, `Signal-iOS/8.29.0.1866 iOS/16.3`, in two places: while NSMutableURLRequest headers are written and again when NSURLSession tasks are created.
+- Records the outgoing Signal User-Agent before/after the task hook and the returned HTTP status in `SignalBypass14-startup.log`; no phone number, request body, token or URL path is logged.
+- If Signal still receives **499**, it is exposed to the old app as **400**, not 200. This prevents 7.19.1 from persisting a second “Update Required” lock while preserving the fact that the registration request failed. A rejected response is never fabricated as successful.
+- Hooks the resolved `AppExpiryImpl` Objective-C class directly as supplementary local-expiry coverage.
 
-After installing v0.4.0, fully close Signal, respring, reopen it and submit the number again. If the service still rejects registration, `SignalBypass14-startup.log` plus the HTTP status line will tell us whether the request is still receiving 499.
+The important test is whether the first registration request now stops returning 499. If it succeeds, Signal can proceed to the actual SMS/session flow. If it still fails, send `Documents/SignalBypass14-startup.log`; the new log will show the Signal host, status and User-Agent without exposing the phone number.
 
 ## Install
 

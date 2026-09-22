@@ -47,7 +47,7 @@ static void startTrace(void) {
     if (snprintf(previous, sizeof(previous), "%s/SignalBypass14-startup.previous.log", folder) >= (int)sizeof(previous)) return;
     (void)rename(path, previous);
     diagnosticFD = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW, 0600);
-    trace("v0.3.0 injected; pid=%d", getpid());
+    trace("v0.5.0 injected; pid=%d", getpid());
 }
 
 static BOOL (*originalDidFinish)(id, SEL, UIApplication *, NSDictionary *);
