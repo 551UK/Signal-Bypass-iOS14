@@ -111,7 +111,7 @@ int main(int argc, const char *argv[]) {
                     if (!backup) backup = loadBackup(legacyBackupPath);
                     if (!backup) continue;
 
-                    if (spoofed) {
+                    if (spoofed || original) {
                         info[@"CFBundleShortVersionString"] = backup[@"CFBundleShortVersionString"] ?: originalShortVersion;
                         info[@"CFBundleVersion"] = backup[@"CFBundleVersion"] ?: originalBuildVersion;
                         info[@"BuildDetails"] = backup[@"BuildDetails"] ?: @{};
@@ -129,20 +129,22 @@ int main(int argc, const char *argv[]) {
                         if (!savePlist(backup, backupPath)) return 1;
                     }
 
-                    info[@"CFBundleShortVersionString"] = spoofShortVersion;
-                    info[@"CFBundleVersion"] = spoofBuildVersion;
+                    // Keep the actual binary identity intact. Only BuildDetails is
+                    // moved into the future, matching the known-working comparison.
+                    info[@"CFBundleShortVersionString"] = originalShortVersion;
+                    info[@"CFBundleVersion"] = originalBuildVersion;
                     info[@"BuildDetails"] = spoofBuildDetails();
                     if (!savePlist(info, path)) return 1;
 
                     NSDictionary *check = [NSDictionary dictionaryWithContentsOfFile:path];
-                    if (![check[@"CFBundleShortVersionString"] isEqual:spoofShortVersion] ||
-                        ![check[@"CFBundleVersion"] isEqual:spoofBuildVersion] ||
+                    if (![check[@"CFBundleShortVersionString"] isEqual:originalShortVersion] ||
+                        ![check[@"CFBundleVersion"] isEqual:originalBuildVersion] ||
                         [check[@"BuildDetails"][@"Timestamp"] doubleValue] != 1821655572.0) {
                         fputs("SignalBypass14: metadata verification failed.\n", stderr);
                         return 1;
                     }
 
-                    puts("SignalBypass14: persisted fresh local Signal identity 8.29.0.1872 with 2027 BuildDetails.");
+                    puts("SignalBypass14: restored Signal 7.19.1 (208) identity with 2027 BuildDetails only.");
                 }
             }
         }
