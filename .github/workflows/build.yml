@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.4.2-rootful
+          name: SignalBypass14-1.4.3-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -41,31 +41,28 @@ jobs:
         run: |
           set -euo pipefail
           cat > build/release-notes.md <<'NOTES'
-          Experimental rootful build for Signal 7.19.1 (208) on iOS 14.
+          Experimental rootful build for Signal on iOS 14.
 
-          v1.4.2 keeps the v1.4.0 final NSURLSession User-Agent rewrite that removed the Update Required popup.
+          v1.4.3 keeps the verification-session behavior that now completes successfully through verified=true.
 
-          Logging is expanded specifically for side-by-side comparison with the successful iOS 16 trace. Every /v1/verification/session request now records:
-          - sequence number
-          - method and redacted path
-          - original User-Agent before rewrite
-          - final User-Agent after rewrite
-          - X-Signal-Agent, Content-Type and Accept-Language
-          - sanitized JSON request body
-          - real HTTP response status
-          - selected response headers
-          - sanitized JSON response body
-          - network error domain/code if present
+          The captured iOS 14 trace proved:
+          - POST /v1/verification/session -> 200
+          - PATCH verification session challenge -> 200
+          - POST verification session /code -> 200
+          - PUT verification session /code -> 200 with verified=true
 
-          Session IDs, phone numbers, push tokens, verification codes, credentials and auth values are redacted.
+          Signal then moves to POST /v1/registration to create/re-register the account. v1.4.3 extends the same proven final NSURLSession User-Agent rewrite to that endpoint:
+          Signal-iOS/8.29.0.1866 iOS/16.2
+
+          No request bodies, verification codes, HTTP statuses or server responses are modified.
+
+          Logging now covers both verification-session traffic and POST /v1/registration, persists across Signal launches, and uses stronger redaction for session IDs, phone numbers, push challenges, auth values, tokens and key material.
 
           Log path: Documents/SignalBypass14-Registration.log
-
-          No HTTP status rewriting, Swift expiry hooks, X-Signal-Agent injection, request-body modification or diagnostic popups are added.
           NOTES
 
-          gh release create v1.4.2 build/uk.551.signalbypass14_1.4.2_iphoneos-arm.deb \
+          gh release create v1.4.3 build/uk.551.signalbypass14_1.4.3_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.4.2' \
+            --title 'Signal Bypass iOS 14 v1.4.3' \
             --notes-file build/release-notes.md \
             --prerelease
