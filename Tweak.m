@@ -2,12 +2,11 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.5.0: keep the proven registration/banner baseline and switch Signal 7.19.1
-// to the libsignal chat transport that already exists inside this app version.
-// The legacy SSK websocket endpoints are no longer completing on the user's
-// device. Signal 7.19.1 contains remote-config-backed UserDefaults switches for
-// libsignal identified/unidentified chat transport; force those switches before
-// ChatConnectionManagerImpl is constructed. No websocket URL/auth rewriting.
+// v1.5.1: return to the proven v1.4.6 runtime/login/banner baseline.
+// v1.5.0's forced libsignal chat transport caused immediate Send Failed, so
+// explicitly restore Signal 7.19.1's legacy transport switches to false.
+// BuildDate.m also restores the real app identity 7.19.1 (208) while keeping
+// only the future BuildDetails date, matching the working comparison setup.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
@@ -385,7 +384,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.0 only prevents this reminder view from becoming visible; it does
+    // v1.5.1 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -402,24 +401,21 @@ __attribute__((constructor)) static void start(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"org.whispersystems.signal"]) return;
 
-        // Signal 7.19.1 already ships both the legacy SSKWebSocket transport and
-        // the newer LibSignalClient.Net transport. ChatConnectionManagerImpl
-        // reads these app-group defaults during its initializer, before RemoteConfig
-        // is available. Set them here so this launch constructs libsignal-backed
-        // identified and unidentified chat connections instead of the dead legacy
-        // chat.signal.org / ud-chat.signal.org websocket implementation.
+        // v1.5.0 persisted these switches in the app-group defaults. Reset them
+        // before ChatConnectionManagerImpl is created so reverting the tweak
+        // genuinely returns to Signal 7.19.1's original SSK websocket transport.
         NSUserDefaults *transportDefaults =
             [[NSUserDefaults alloc] initWithSuiteName:@"group.org.whispersystems.signal.group"];
         if (transportDefaults) {
-            [transportDefaults setBool:YES forKey:@"UseLibsignalForIdentifiedWebsocket"];
-            [transportDefaults setBool:YES forKey:@"UseLibsignalForUnidentifiedWebsocket"];
+            [transportDefaults setBool:NO forKey:@"UseLibsignalForIdentifiedWebsocket"];
+            [transportDefaults setBool:NO forKey:@"UseLibsignalForUnidentifiedWebsocket"];
             [transportDefaults setBool:NO forKey:@"EnableShadowingForUnidentifiedWebsocket"];
             [transportDefaults synchronize];
         }
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.0 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: verification -> POST /v1/registration (spqr=true) -> PUT /v2/keys. Chat transport forced to libsignal for identified + unidentified connections. UA rewrite scope: all chat.signal.org NSURLSession requests.\nSensitive values are redacted.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.1 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: verification -> POST /v1/registration (spqr=true) -> PUT /v2/keys. UA rewrite scope: all chat.signal.org requests.\nSensitive values are redacted.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
@@ -472,7 +468,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace([NSString stringWithFormat:@"Hooks installed on %@.", NSStringFromClass(sessionClass)]);
         appendTrace([NSString stringWithFormat:
-            @"Transport defaults: identified=%d unidentified=%d shadowing=%d",
+            @"Transport defaults restored: identified=%d unidentified=%d shadowing=%d",
             transportDefaults ? [transportDefaults boolForKey:@"UseLibsignalForIdentifiedWebsocket"] : -1,
             transportDefaults ? [transportDefaults boolForKey:@"UseLibsignalForUnidentifiedWebsocket"] : -1,
             transportDefaults ? [transportDefaults boolForKey:@"EnableShadowingForUnidentifiedWebsocket"] : -1]);
