@@ -109,8 +109,6 @@ static void installSwiftRegistrationHooks(void) {
                      (void *)&swiftReturnFalse);
 }
 
-#import "StartupDiagnostics.h"
-
 static BOOL signalServiceHost(NSString *host) {
     NSString *lower = host.lowercaseString;
     return [lower isEqualToString:@"signal.org"] ||
