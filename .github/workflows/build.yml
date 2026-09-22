@@ -24,7 +24,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.1.0-rootful
+          name: SignalBypass14-1.1.1-rootful
           path: build/*.deb
           if-no-files-found: error
       - name: Publish prerelease
@@ -36,10 +36,10 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental build for Signal 7.19.1 (208), rootful iOS 14.
 
-          Crash-safe runtime marker build.
+          Stability rollback build.
 
-          v1.0.3 used Foundation objects inside the earliest dylib constructor and caused Signal to close immediately on this device. v1.1.0 replaces that marker with plain C open/write/fsync/close calls only, before any Objective-C or UIKit diagnostic work.
+          v1.1.0 caused Signal to terminate on launch. v1.1.1 restores the exact runtime hook ordering and constructor behavior from v1.0.4, the last build confirmed to open Signal normally on the test device.
 
-          The marker remains SignalBypass14-runtime-marker.txt in Signal's Documents directory. The existing arm64+arm64e rootful package, 0755 dylib permissions, launch fix and registration hooks are otherwise unchanged.
+          No new registration hooks are introduced in this build. It keeps the arm64+arm64e rootful dylib, 0755 permissions, persisted 8.29.0.1866 metadata and the v1.0.4 compatibility hooks.
           NOTES
-          gh release create v1.1.0 build/uk.551.signalbypass14_1.1.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.1.0' --notes-file build/release-notes.md --prerelease
+          gh release create v1.1.1 build/uk.551.signalbypass14_1.1.1_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.1.1' --notes-file build/release-notes.md --prerelease
