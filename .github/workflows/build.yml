@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.3.0-rootful
+          name: SignalBypass14-1.4.0-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,20 +43,21 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental rootful build for Signal 7.19.1 (208) on iOS 14.
 
-          v1.3.0 is the minimal expiry-functions test. It removes the network interception, HTTP status rewriting, diagnostic popups/logging, OS spoofing, and runtime bundle hooks from the previous diagnostic builds.
+          v1.4.0 removes the crash-prone pure-Swift expiry hooks introduced by v1.3.0.
 
-          Runtime hooks are limited to the identified SignalServiceKit expiry/update paths:
-          - AppExpiryImpl.isExpired -> false
-          - setHasAppExpiredAtCurrentVersion(db:) -> no-op
-          - AppExpiryImpl.appExpiredStatusCode -> 0
-          - RegistrationSession.hasUnknownChallengeRequiringAppUpdate -> false
-          - small Objective-C expiry fallbacks when visible
+          The successful Signal 8.29 iOS 16 registration trace showed the initial POST /v1/verification/session using:
+          User-Agent: Signal-iOS/8.29.0.1866 iOS/16.2
+          and receiving HTTP 200.
 
-          The installer gives Signal a fresh local AppVersion identity, 8.29.0.1868, with BuildDetails timestamp 22 Sep 2026 17:00 UTC so an AppExpiry state stored under 8.29.0.1867 does not match the current local identity.
+          The failing iOS 14 capture showed the same endpoint seeing Signal-iOS/7.19.1.208 iOS/14.x and returning HTTP 499.
+
+          v1.4.0 therefore makes one runtime change only: it hooks the final concrete NSURLSession upload/data-task methods and replaces User-Agent only for Signal /v1/verification/session traffic, after Signal has finished preparing the request. It does not rewrite HTTP statuses, add X-Signal-Agent, patch Swift expiry functions, or alter request bodies.
+
+          The installer uses fresh local identity 8.29.0.1869 so a previous cached AppExpiry identity does not exactly match.
           NOTES
 
-          gh release create v1.3.0 build/uk.551.signalbypass14_1.3.0_iphoneos-arm.deb \
+          gh release create v1.4.0 build/uk.551.signalbypass14_1.4.0_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.3.0' \
+            --title 'Signal Bypass iOS 14 v1.4.0' \
             --notes-file build/release-notes.md \
             --prerelease
