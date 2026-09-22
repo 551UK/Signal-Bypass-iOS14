@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <sys/utsname.h>
-#import <string.h>
+#import <string.h>\n\n#import "StartupDiagnostics.h"
 
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
