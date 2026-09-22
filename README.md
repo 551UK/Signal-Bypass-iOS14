@@ -1,41 +1,41 @@
 # Signal Bypass iOS 14
 
-## Stable checkpoints
+## v1.4.5 — known-good clean login baseline
 
-- **v1.4.5** — known-good fresh login/registration.
-- **v1.4.6** — same working login plus unsupported-iOS banner suppression.
-- **v1.4.7** — v1.4.6 baseline plus post-login WebSocket and CDSI compatibility.
+v1.4.5 is preserved unchanged.
 
-The earlier releases/tags remain unchanged.
+## v1.4.6 — known-good login + banner baseline
 
-## v1.4.7 — Find by Phone Number / WebSocket compatibility
+v1.4.6 is preserved unchanged and is the baseline for the next compatibility work.
 
-After login, FLEX showed three useful facts:
+## v1.4.8 — normal chat WebSocket compatibility only
 
-1. `GET /v2/directory/auth` already succeeds with HTTP 200 and the Signal 8.29 User-Agent.
-2. The old identified chat WebSocket still uses `login` and `password` URL query parameters and receives a bad server response.
-3. The old anonymous WebSocket still targets `ud-chat.signal.org`, which no longer resolves.
+v1.4.8 is rebuilt directly from v1.4.6. It intentionally does **not** include the CDSI/contact-discovery experiment from v1.4.7.
 
-Current Signal-Server expects authenticated WebSocket credentials as HTTP Basic Authorization. v1.4.7 therefore moves the existing credentials from the URL query into the `Authorization` header and removes them from the URL. It also maps the retired anonymous host to `chat.signal.org`.
+FLEX showed Signal 7.19.1 attempting:
 
-### CDSI enclave update
+`chat.signal.org/v1/websocket/?login=...&password=...`
 
-Signal 7.19.1 embeds an obsolete Contact Discovery Service enclave identity:
+and receiving a bad server response. It also attempted the old anonymous host:
 
-`0f6fd79cdfdaa5b2e6337f534d3baf999318b0c462a7ac1f41297a3e4b424a57`
+`ud-chat.signal.org/v1/websocket/`
 
-The supplied Signal 8.29 IPA's LibSignalClient 0.102.0 contains:
+which no longer resolves.
 
-`15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b`
+The old app also sent its old User-Agent on those WebSocket upgrades.
 
-v1.4.7 replaces the old 64-byte string **in memory only** inside the loaded SignalServiceKit image before CDSI initializes. This updates both the `/v1/<mrenclave>/discovery` path produced by the old code and the enclave value passed into its existing Cds2Client attestation logic.
+v1.4.8 changes only that transport layer:
 
-No app binary is modified on disk.
+- `ud-chat.signal.org` is routed to `chat.signal.org`
+- legacy `login` / `password` query parameters are removed
+- identified WebSocket credentials are moved to HTTP Basic `Authorization`
+- anonymous WebSocket remains unauthenticated
+- WebSocket User-Agent becomes `Signal-iOS/8.29.0.1866 iOS/16.2`
 
-### Unchanged from v1.4.6
+Registration, SPQR, `/v1/registration`, `/v2/keys`, the existing REST UA rewrite, and the unsupported-iOS banner fix are copied unchanged from v1.4.6.
 
-Registration/session behavior, `spqr=true`, `POST /v1/registration`, `PUT /v2/keys`, the existing HTTP User-Agent rewrite, and the expiry-banner hook are unchanged.
-
-Persistent sanitized trace:
+The trace remains at:
 
 `Signal/Documents/SignalBypass14-Registration.log`
+
+WebSocket log lines contain only host/path/auth-mode information and never the login/password values.
