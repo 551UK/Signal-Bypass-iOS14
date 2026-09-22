@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.4.9-rootful
+          name: SignalBypass14-1.5.0-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,36 +43,37 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.4.9 is rebuilt directly from the proven v1.4.6 login/banner code.
-          No v1.4.7 or v1.4.8 WebSocket experiment is included.
+          v1.5.0 targets the post-login send/receive transport failure.
 
-          Why this test:
-          - v1.4.6 obtains /v1/certificate/delivery -> HTTP 200
-          - outgoing messages remain spinning
-          - FLEX shows no subsequent /v1/messages submission
-          - Signal 7.19.1 checks appExpiry.isExpired before entering the message-send pipeline
-          - AppExpiry persists an "immediately expired" state keyed by currentAppVersion after a server 499
-          - the user's comparison device reportedly works after moving BuildDetails into 2027
+          Evidence:
+          - v1.4.6 registration works and /v1/certificate/delivery returns HTTP 200.
+          - outgoing messages remain queued/spinning and never reach /v1/messages.
+          - incoming messages sent by a working iOS 16 client remain at one tick and never appear.
+          - FLEX shows Signal 7.19.1 repeatedly using its legacy SSK websocket transport.
+          - Signal 7.19.1 source already contains an alternate LibSignalClient.Net chat transport.
+          - ChatConnectionManagerImpl selects that transport at startup from these app-group UserDefaults:
+            UseLibsignalForIdentifiedWebsocket
+            UseLibsignalForUnidentifiedWebsocket
 
-          v1.4.9 changes only local expiry identity/metadata:
-          - local spoof stays 8.29
-          - bundle build advances from 1870 to 1871, giving AppExpiry a new currentAppVersion identity so an older persisted immediate-expiry record is not restored
-          - BuildDetails.Timestamp = 1821655572
-          - BuildDetails.DateTime = Wed Sep 22 23:26:12 UTC 2027
+          v1.5.0 forces both transport switches to true before ChatConnectionManagerImpl is constructed and disables unidentified shadowing.
 
-          Preserved exactly from v1.4.6:
-          - fresh verification/login compatibility
-          - spqr=true registration field
+          It does NOT rewrite websocket URLs or move credentials between query/header forms.
+
+          Preserved:
+          - verification/session UA compatibility
+          - spqr=true registration compatibility
           - /v1/registration handling
           - /v2/keys handling
-          - chat.signal.org REST User-Agent rewrite
+          - chat.signal.org NSURLSession UA compatibility
           - unsupported-iOS banner suppression
+          - 2027 BuildDetails expiry test
 
-          This build intentionally does not alter the legacy WebSocket path.
+          Local spoof build advances to 1872 so any AppExpiry record created under 1871 is not restored.
+          NOTES
           NOTES
 
-          gh release create v1.4.9 build/uk.551.signalbypass14_1.4.9_iphoneos-arm.deb \
+          gh release create v1.5.0 build/uk.551.signalbypass14_1.5.0_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.4.9' \
+            --title 'Signal Bypass iOS 14 v1.5.0' \
             --notes-file build/release-notes.md \
             --prerelease
