@@ -10,12 +10,12 @@
 // local bundle identity before Signal starts.
 
 static NSString *const spoofShortVersion = @"8.29";
-static NSString *const spoofBuildVersion = @"1871";
+static NSString *const spoofBuildVersion = @"1872";
 static NSString *const originalShortVersion = @"7.19.1";
 static NSString *const originalBuildVersion = @"208";
 
 static BOOL isKnownSpoofBuild(NSString *build) {
-    return [@[@"1866", @"1867", @"1868", @"1869", @"1870", @"1871"] containsObject:build ?: @""];
+    return [@[@"1866", @"1867", @"1868", @"1869", @"1870", @"1871", @"1872"] containsObject:build ?: @""];
 }
 
 static NSDictionary *spoofBuildDetails(void) {
@@ -142,7 +142,7 @@ int main(int argc, const char *argv[]) {
                         return 1;
                     }
 
-                    puts("SignalBypass14: persisted fresh local Signal identity 8.29.0.1871 with 2027 BuildDetails.");
+                    puts("SignalBypass14: persisted fresh local Signal identity 8.29.0.1872 with 2027 BuildDetails.");
                 }
             }
         }
