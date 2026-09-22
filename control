@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.4.3
+Version: 1.4.4
 Architecture: iphoneos-arm
-Description: Signal iOS 14 compatibility build extending the proven final User-Agent rewrite through verified session account creation with persistent sanitized logging.
+Description: Signal iOS 14 compatibility test adding the server-required SPQR capability to the final account registration request while preserving the working verification flow.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
