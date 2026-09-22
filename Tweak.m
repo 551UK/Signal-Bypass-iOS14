@@ -421,13 +421,10 @@ static NSMutableURLRequest *modernizeChatWebSocket(id sessionObject,
     if (!components) return nil;
 
     NSString *originalHost = components.host.lowercaseString ?: @"";
-    BOOL movedUdHost = NO;
-
     // Signal 7.19.1 has a separate anonymous socket at ud-chat.signal.org.
     // That hostname is retired; current Signal uses the unified chat service.
     if ([originalHost isEqualToString:@"ud-chat.signal.org"]) {
         components.host = @"chat.signal.org";
-        movedUdHost = YES;
     }
 
     NSString *login = nil;
