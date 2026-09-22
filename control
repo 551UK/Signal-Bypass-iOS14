@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.3.0
+Version: 1.4.0
 Architecture: iphoneos-arm
-Description: Minimal Signal 7.19.1 iOS 14 expiry-path compatibility build with a fresh local AppVersion identity.
+Description: Signal 7.19.1 iOS 14 registration compatibility build forcing the proven Signal 8.29 User-Agent at the final NSURLSession layer.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
