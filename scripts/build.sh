@@ -1,4 +1,5 @@
 #!/bin/bash
+# fresh runner trigger v1.0.2
 set -euo pipefail
 cd "$(dirname "$0")/.."
 command -v ldid >/dev/null
