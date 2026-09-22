@@ -2,9 +2,16 @@ name: Build iOS 14 DEB
 on:
   push:
     branches: [main]
+    paths:
+      - Tweak.m
+      - BuildDate.m
+      - control
+      - SignalBypass14.plist
+      - scripts/**
+      - .github/workflows/build.yml
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     runs-on: macos-14
@@ -16,6 +23,22 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-0.1.0-rootful
+          name: SignalBypass14-0.2.0-rootful
           path: build/*.deb
           if-no-files-found: error
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cat > build/release-notes.md <<'NOTES'
+          Experimental build for Signal 7.19.1 (208), rootful iOS 14.
+
+          Combines the supplied expiry tweak's error-code and OS-version hooks with a persistent Info.plist build-date edit (matching Timestamp and DateTime for 1 January 2099). Retains app-version spoofing and limited diagnostics.
+
+          Close Signal and remove FuckSignalExpiry before installing, then respring. Original build dates are backed up and restored on uninstall when unchanged by other edits. Signal account/database data is not deleted.
+
+          This is not device-validated. Black-screen, registration, messaging and call success are not confirmed; the reference setup reports failed calls.
+          NOTES
+          gh release create v0.2.0 build/uk.551.signalbypass14_0.2.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v0.2.0' --notes-file build/release-notes.md --prerelease

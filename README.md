@@ -1,34 +1,32 @@
 # Signal Bypass iOS 14
 
-Experimental rootful tweak for **Signal 7.19.1 (208) on iOS 14**. This is an initial compatibility build, not a confirmed working Signal client.
+Experimental rootful tweak for **Signal 7.19.1 (208) on iOS 14**. Version 0.2.0 reproduces the supplied expiry tweak's hooks and the reported Info.plist edit. It is not confirmed to fix the black screen, registration, messaging or calls. The reference setup still reports failed calls.
 
-## Included
+## Changes in 0.2.0
 
-- Reports app version 8.29 / build 1866 through Signal's bundle metadata.
-- Reports iOS 16.3 through `UIDevice.systemVersion`, including Signal's standard user-agent construction.
-- Refreshes Signal's in-memory build timestamp to address its 90-day local expiry, including Swift code that reads the timestamp directly.
-- Overrides the two known Objective-C `isExpired` accessors when present.
-- Applies to Signal, its notification extension and share extension; remains inactive on other iOS/app versions.
-- Logs activation and Foundation HTTP error status/host only. Does not log message contents, request bodies, tokens or phone numbers.
+- Installer sets `BuildDetails.Timestamp` to `4070908800` and `BuildDetails.DateTime` to `Thu Jan 01 00:00:00 UTC 2099` in the installed Signal app's Info.plist. These represent the same UTC date. Runtime bundle hooks report the same values.
+- Adds the supplied FuckSignalExpiry 0.9.0 behavior: `AppExpiryImpl.appExpiredStatusCode` returns 0 and `NSProcessInfo.operatingSystemVersion` reports major version 10000, preserving minor/patch. This changes OS-version decisions inside Signal and may select unsupported code paths; device testing is necessary.
+- Keeps the Signal 8.29 / build 1866 spoof and UIDevice version string 16.3 used for the standard user agent. The two OS APIs intentionally differ to reproduce the reference tweak while retaining the existing network identity.
+- Uses the kernel release for the iOS 14 gate so another NSProcessInfo spoof cannot disable activation.
+- Keeps supplementary Objective-C expiry accessors and bounded HTTP status/host diagnostics. Actual HTTP responses are not rewritten.
 
-OS availability checks remain genuine so iOS 14 does not attempt to call unavailable iOS 15/16 APIs. The tweak does not modify the system clock, database, encryption, TLS verification, or server response status codes.
+## Install
 
-## Install / test
+1. Fully close Signal. Keep Signal **7.19.1 (208)** installed on the rootful iOS 14 device.
+2. Remove **FuckSignalExpiry** and other Signal spoofers. The new package declares a conflict with the supplied package because it incorporates its hooks.
+3. Install the DEB from [Releases](https://github.com/551UK/Signal-Bypass-iOS14/releases). Confirm the installer prints that the Info.plist dates were changed.
+4. Respring, open Signal, then test registration, sending/receiving, locked-phone notifications and calls separately.
 
-1. Keep Signal **7.19.1 (208)** installed on your jailbroken iOS 14 device. Do not replace it with 8.29 or delete its data.
-2. Download the rootful DEB from the latest successful [Actions build](https://github.com/551UK/Signal-Bypass-iOS14/actions).
-3. Install with your package manager, respring, and launch Signal. Allow tweak injection into Signal and its extensions if using Choicy.
-4. Check whether the expiry screen clears. Then test registration if needed, sending, receiving with Signal open, and receiving while locked. Confirm delivery from another device.
-5. Report the first failing step and exact error/screenshot. For a crash, include the Signal `.ips` report. The startup marker is `[SignalBypass14]`.
+The installer only edits the main app's two build-date fields and keeps their original BuildDetails dictionary alongside Info.plist. It does not erase Signal's database or account. Uninstall restores those two fields if they still match this tweak's values, preserving later manual changes. Reinstalling/updating the app can remove the edit; reinstall this tweak afterwards.
 
-Uninstall the tweak and restart Signal to remove its hooks. Signal may retain its own version bookkeeping; no automatic database cleanup is performed.
+The reference user recommends a TrollStore-installed IPA, but the reason the App Store copy fails has not been established. Do not delete an existing installation or its data to switch installation methods without a data-preservation plan. App-bundle edits can affect signature validation depending on the installation/jailbreak setup.
+
+If Signal remains black, report whether it stays open or closes, the installation method, and a crash report if one exists. Logs use `[SignalBypass14]`. No request bodies, tokens or phone numbers are logged by this tweak.
 
 ## Limits
 
-The older app's protocol and cryptographic implementation remain unchanged. Registration, current service endpoints, contact discovery, attachment handling and messaging compatibility still require device testing. HTTP 499 remains an error and can persist server-triggered expiry for the spoofed version. The Objective-C expiry hooks do not intercept all Swift calls. The build-date override handles default expiry but does not erase persisted remote expiry for the same spoofed version.
-
-Foundation HTTP diagnostics do not cover every native libsignal/WebSocket path. This package has no device validation yet. See [the comparison notes](docs/ipa-comparison.md) for verified findings.
+No protocol or cryptographic backport is included. Pure Swift calls can bypass Objective-C hooks, including the error-code getter. Previously persisted remote expiry for the spoofed version is not erased. Foundation diagnostics do not cover every native libsignal/WebSocket path. Successful compilation does not establish device functionality.
 
 ## Build
 
-On macOS with Xcode's iPhoneOS SDK, `brew install ldid dpkg`, then `bash scripts/build.sh`. GitHub Actions performs the same build. No IPA or account data is committed.
+macOS with Xcode's iPhoneOS SDK: `brew install ldid dpkg`, then `bash scripts/build.sh`. GitHub Actions builds the package and publishes a prerelease. See [comparison notes](docs/ipa-comparison.md).

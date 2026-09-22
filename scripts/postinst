@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    /usr/libexec/signalbypass14-builddate apply
+    echo 'SignalBypass14: close Signal completely and respring before testing.'
+fi

@@ -2,6 +2,8 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <sys/utsname.h>
+#import <string.h>
 
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
@@ -9,7 +11,7 @@ static HookMessage hookMessage;
 static NSString *const targetVersion = @"8.29";
 static NSString *const targetBuild = @"1866";
 static NSString *const targetOS = @"16.3";
-static NSTimeInterval launchTime;
+static const NSTimeInterval futureTimestamp = 4070908800.0; // 2099-01-01 UTC
 static id (*originalObject)(id, SEL, NSString *);
 static NSDictionary *(*originalInfo)(id, SEL);
 
@@ -26,7 +28,8 @@ static id replacementValue(NSString *key, id value) {
     if ([key isEqualToString:@"CFBundleVersion"]) return targetBuild;
     if ([key isEqualToString:@"BuildDetails"] && [value isKindOfClass:NSDictionary.class]) {
         NSMutableDictionary *details = [value mutableCopy];
-        details[@"Timestamp"] = @(launchTime);
+        details[@"Timestamp"] = @(futureTimestamp);
+        details[@"DateTime"] = @"Thu Jan 01 00:00:00 UTC 2099";
         return details;
     }
     return value;
@@ -53,6 +56,15 @@ static NSString *deviceVersion(id self, SEL sel) { return targetOS; }
 // Objective-C callers only. Pure Swift calls are addressed by the build date
 // and version inputs above, not assumed to pass through this selector.
 static BOOL notExpired(id self, SEL sel) { return NO; }
+
+// Reproduce the two hooks verified in the supplied FuckSignalExpiry 0.9.0.
+static NSUInteger expiryStatusCode(id self, SEL sel) { return 0; }
+static NSOperatingSystemVersion (*originalOSVersion)(id, SEL);
+static NSOperatingSystemVersion legacyOSVersion(id self, SEL sel) {
+    NSOperatingSystemVersion value = originalOSVersion(self, sel);
+    value.majorVersion = 10000;
+    return value;
+}
 
 static void install(Class cls, NSString *name, IMP replacement, IMP *original) {
     SEL selector = NSSelectorFromString(name);
@@ -84,10 +96,11 @@ __attribute__((constructor)) static void start(void) {
         if (![@[@"org.whispersystems.signal", @"org.whispersystems.signal.SignalNSE",
                 @"org.whispersystems.signal.shareextension"] containsObject:identifier]) return;
         // Capture genuine values before installing any hook.
-        NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
+        struct utsname kernel;
+        BOOL isIOS14 = uname(&kernel) == 0 && strncmp(kernel.release, "20.", 3) == 0;
         NSString *installedVersion = [main objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
         NSString *installedBuild = [main objectForInfoDictionaryKey:@"CFBundleVersion"];
-        if (os.majorVersion != 14 || ![installedVersion isEqualToString:@"7.19.1"] ||
+        if (!isIOS14 || ![installedVersion isEqualToString:@"7.19.1"] ||
             ![installedBuild isEqualToString:@"208"]) {
             NSLog(@"[SignalBypass14] Inactive: requires iOS 14, Signal 7.19.1 (208)");
             return;
@@ -98,13 +111,16 @@ __attribute__((constructor)) static void start(void) {
             NSLog(@"[SignalBypass14] No compatible hook provider");
             return;
         }
-        launchTime = NSDate.date.timeIntervalSince1970;
+        install(NSProcessInfo.class, @"operatingSystemVersion", (IMP)legacyOSVersion, (IMP *)&originalOSVersion);
+        Class expiryClass = NSClassFromString(@"SignalServiceKit.AppExpiryImpl");
+        if (!expiryClass) expiryClass = objc_getClass("_TtC16SignalServiceKit13AppExpiryImpl");
+        install(object_getClass(expiryClass), @"appExpiredStatusCode", (IMP)expiryStatusCode, NULL);
         install(NSBundle.class, @"objectForInfoDictionaryKey:", (IMP)bundleObject, (IMP *)&originalObject);
         install(NSBundle.class, @"infoDictionary", (IMP)bundleInfo, (IMP *)&originalInfo);
         install(UIDevice.class, @"systemVersion", (IMP)deviceVersion, NULL);
         install(NSClassFromString(@"AppExpiry"), @"isExpired", (IMP)notExpired, NULL);
         install(NSClassFromString(@"SignalServiceKit.AppExpiryImpl"), @"isExpired", (IMP)notExpired, NULL);
         install(NSHTTPURLResponse.class, @"statusCode", (IMP)responseStatus, (IMP *)&originalStatus);
-        NSLog(@"[SignalBypass14] v0.1.0 active; reported app 8.29.0.1866 / iOS 16.3; build date refreshed");
+        NSLog(@"[SignalBypass14] v0.2.0 active; app 8.29.0.1866; legacy expiry hooks; build date 2099-01-01");
     }
 }
