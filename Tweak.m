@@ -2,13 +2,20 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.4.1: keep the v1.4.0 final registration User-Agent rewrite and add
+// v1.4.2: keep the v1.4.0 final registration User-Agent rewrite and add
 // sanitized logging around the completion-handler requests Signal 7.19.1 uses.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
 
 static NSString *const workingUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.2";
+static NSUInteger gTraceSequence = 0;
+
+static NSUInteger nextTraceSequence(void) {
+    @synchronized (NSFileHandle.class) {
+        return ++gTraceSequence;
+    }
+}
 
 static NSString *tracePath(void) {
     return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/SignalBypass14-Registration.log"];
@@ -133,6 +140,24 @@ static NSString *headerValue(NSURLRequest *request, NSString *wanted) {
     return nil;
 }
 
+static NSString *responseHeaders(NSURLResponse *response) {
+    if (![response isKindOfClass:NSHTTPURLResponse.class]) return @"<not HTTP>";
+
+    NSDictionary *headers = ((NSHTTPURLResponse *)response).allHeaderFields ?: @{};
+    NSMutableDictionary *selected = [NSMutableDictionary dictionary];
+
+    for (NSString *wanted in @[@"Content-Type", @"X-Signal-Timestamp", @"Retry-After", @"Cache-Control"]) {
+        for (id keyObj in headers) {
+            NSString *key = [keyObj description];
+            if ([key caseInsensitiveCompare:wanted] == NSOrderedSame) {
+                selected[wanted] = [headers[keyObj] description];
+                break;
+            }
+        }
+    }
+    return selected.description;
+}
+
 static NSURLRequest *rewriteRegistrationIdentity(NSURLRequest *request) {
     if (!isRegistrationRequest(request)) return request;
 
@@ -141,22 +166,39 @@ static NSURLRequest *rewriteRegistrationIdentity(NSURLRequest *request) {
     return copy;
 }
 
-static void logRequest(NSURLRequest *request) {
-    if (!isRegistrationRequest(request)) return;
+static void logRequest(NSUInteger sequence,
+                       NSURLRequest *original,
+                       NSURLRequest *finalRequest,
+                       NSData *body) {
+    if (!isRegistrationRequest(finalRequest)) return;
+
     appendTrace([NSString stringWithFormat:
-        @"[%@] REQUEST %@ https://%@%@\nUser-Agent: %@\nX-Signal-Agent: %@\nContent-Type: %@\nAccept-Language: %@",
+        @"[%@] [R%03lu] REQUEST %@ https://%@%@\n"
+         "Original-User-Agent: %@\n"
+         "Final-User-Agent: %@\n"
+         "X-Signal-Agent: %@\n"
+         "Content-Type: %@\n"
+         "Accept-Language: %@\n"
+         "Body: %@",
         timestamp(),
-        request.HTTPMethod ?: @"?",
-        request.URL.host ?: @"?",
-        safePath(request.URL),
-        headerValue(request, @"User-Agent") ?: @"<missing>",
-        headerValue(request, @"X-Signal-Agent") ?: @"<missing>",
-        headerValue(request, @"Content-Type") ?: @"<missing>",
-        headerValue(request, @"Accept-Language") ?: @"<missing>"
+        (unsigned long)sequence,
+        finalRequest.HTTPMethod ?: @"?",
+        finalRequest.URL.host ?: @"?",
+        safePath(finalRequest.URL),
+        headerValue(original, @"User-Agent") ?: @"<missing>",
+        headerValue(finalRequest, @"User-Agent") ?: @"<missing>",
+        headerValue(finalRequest, @"X-Signal-Agent") ?: @"<missing>",
+        headerValue(finalRequest, @"Content-Type") ?: @"<missing>",
+        headerValue(finalRequest, @"Accept-Language") ?: @"<missing>",
+        safeBody(body ?: finalRequest.HTTPBody)
     ]);
 }
 
-static void logResponse(NSURLRequest *request, NSURLResponse *response, NSData *data, NSError *error) {
+static void logResponse(NSUInteger sequence,
+                        NSURLRequest *request,
+                        NSURLResponse *response,
+                        NSData *data,
+                        NSError *error) {
     if (!isRegistrationRequest(request)) return;
 
     NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class]
@@ -167,11 +209,16 @@ static void logResponse(NSURLRequest *request, NSURLResponse *response, NSData *
         : @"none";
 
     appendTrace([NSString stringWithFormat:
-        @"[%@] RESPONSE HTTP %ld https://%@%@ error=%@\nBody: %@\n",
-        timestamp(), (long)status,
+        @"[%@] [R%03lu] RESPONSE HTTP %ld https://%@%@ error=%@\n"
+         "Headers: %@\n"
+         "Body: %@\n",
+        timestamp(),
+        (unsigned long)sequence,
+        (long)status,
         request.URL.host ?: @"?",
         safePath(request.URL),
         err,
+        responseHeaders(response),
         safeBody(data)
     ]);
 }
@@ -190,18 +237,20 @@ static DataRequestCompletionFn originalDataRequestCompletion;
 
 static NSURLSessionUploadTask *uploadData(id self, SEL sel, NSURLRequest *request, NSData *data) {
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
-    logRequest(rewritten);
+    NSUInteger sequence = nextTraceSequence();
+    logRequest(sequence, request, rewritten, data);
     return originalUploadData(self, sel, rewritten, data);
 }
 
 static NSURLSessionUploadTask *uploadDataCompletion(id self, SEL sel, NSURLRequest *request, NSData *data,
                                                      void (^completion)(NSData *, NSURLResponse *, NSError *)) {
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
-    logRequest(rewritten);
+    NSUInteger sequence = nextTraceSequence();
+    logRequest(sequence, request, rewritten, data);
 
     void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
     ^(NSData *responseData, NSURLResponse *response, NSError *error) {
-        logResponse(rewritten, response, responseData, error);
+        logResponse(sequence, rewritten, response, responseData, error);
         if (completion) completion(responseData, response, error);
     };
 
@@ -210,18 +259,20 @@ static NSURLSessionUploadTask *uploadDataCompletion(id self, SEL sel, NSURLReque
 
 static NSURLSessionDataTask *dataRequest(id self, SEL sel, NSURLRequest *request) {
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
-    logRequest(rewritten);
+    NSUInteger sequence = nextTraceSequence();
+    logRequest(sequence, request, rewritten, rewritten.HTTPBody);
     return originalDataRequest(self, sel, rewritten);
 }
 
 static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLRequest *request,
                                                     void (^completion)(NSData *, NSURLResponse *, NSError *)) {
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
-    logRequest(rewritten);
+    NSUInteger sequence = nextTraceSequence();
+    logRequest(sequence, request, rewritten, rewritten.HTTPBody);
 
     void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
     ^(NSData *responseData, NSURLResponse *response, NSError *error) {
-        logResponse(rewritten, response, responseData, error);
+        logResponse(sequence, rewritten, response, responseData, error);
         if (completion) completion(responseData, response, error);
     };
 
@@ -240,7 +291,7 @@ __attribute__((constructor)) static void start(void) {
 
         [@"" writeToFile:tracePath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
         appendTrace([NSString stringWithFormat:
-            @"SignalBypass14 v1.4.1 registration trace\nApp: %@ (%@)\niOS: %@\nSensitive values are redacted.\n",
+            @"SignalBypass14 v1.4.2 registration trace\nApp: %@ (%@)\niOS: %@\nCompare against successful iOS16 flow: POST session -> PATCH session -> POST /code -> PUT /code.\nSensitive values are redacted.\n",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
             NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?"
