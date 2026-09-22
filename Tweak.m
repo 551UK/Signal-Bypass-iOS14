@@ -2,10 +2,12 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.4.4: keep the verified session flow and final User-Agent rewrite.
-// The server now accepts the verification code but rejects POST /v1/registration
-// with 499 "Missing required device capability". This test adds only spqr=true
-// to accountAttributes.capabilities for that final account-creation request.
+// v1.4.5: keep the complete verified-session + SPQR account-registration fix.
+// v1.4.4 now gets POST /v1/registration -> HTTP 200. The next request,
+// PUT /v2/keys, is rejected with an empty HTTP 499 because it leaves with the
+// old User-Agent. Apply the proven Signal 8.29 identity to all chat.signal.org
+// service requests, while leaving request bodies/responses untouched except for
+// the already-required spqr=true registration compatibility field.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
@@ -61,6 +63,12 @@ static BOOL isSignalHost(NSString *host) {
            [h hasSuffix:@".whispersystems.org"];
 }
 
+static BOOL isChatServiceRequest(NSURLRequest *request) {
+    if (!request) return NO;
+    NSString *host = request.URL.host.lowercaseString ?: @"";
+    return [host isEqualToString:@"chat.signal.org"];
+}
+
 static BOOL isRegistrationRequest(NSURLRequest *request) {
     if (!request || !isSignalHost(request.URL.host)) return NO;
 
@@ -72,6 +80,9 @@ static BOOL isRegistrationRequest(NSURLRequest *request) {
     // Stage 2: after the verification session returns verified=true,
     // Signal creates/re-registers the account here.
     if ([path isEqualToString:@"/v1/registration"]) return YES;
+
+    // Stage 3: authenticated pre-key upload immediately after account creation.
+    if ([path isEqualToString:@"/v2/keys"]) return YES;
 
     return NO;
 }
@@ -110,7 +121,8 @@ static BOOL sensitiveKey(NSString *key) {
         @"token", @"password", @"credential", @"authorization", @"auth",
         @"sessionid", @"session_id", @"verificationcode", @"captcha",
         @"pushchallenge", @"secret", @"identity", @"prekey", @"publickey",
-        @"signature", @"kyber", @"recoverypassword", @"registrationid"
+        @"signature", @"kyber", @"recoverypassword", @"registrationid",
+        @"accesskey", @"profilekey"
     ];
     for (NSString *n in needles) if ([k containsString:n]) return YES;
     return NO;
@@ -215,7 +227,13 @@ static NSData *rewriteAccountRegistrationBody(NSURLRequest *request, NSData *bod
 }
 
 static NSURLRequest *rewriteRegistrationIdentity(NSURLRequest *request) {
-    if (!isRegistrationRequest(request)) return request;
+    // Current Signal-Server applies remote client deprecation beyond the
+    // registration endpoints. Once the account is created, the old client
+    // immediately hits PUT /v2/keys with its old identity and receives 499.
+    // Use the same proven identity for every request to the authenticated
+    // Signal chat service so we do not have to chase the same version gate
+    // endpoint-by-endpoint.
+    if (!isChatServiceRequest(request)) return request;
 
     NSMutableURLRequest *copy = [request mutableCopy];
     [copy setValue:workingUserAgent forHTTPHeaderField:@"User-Agent"];
@@ -373,7 +391,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.4 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: POST session -> PATCH session -> POST /code -> PUT /code -> POST /v1/registration (spqr=true).\nSensitive values are redacted.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.5 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: verification -> POST /v1/registration (spqr=true) -> PUT /v2/keys. UA rewrite scope: all chat.signal.org requests.\nSensitive values are redacted.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
