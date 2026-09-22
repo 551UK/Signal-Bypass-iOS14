@@ -1,27 +1,17 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
-#import <mach-o/dyld.h>
-#import <mach-o/loader.h>
-#import <mach/mach.h>
-#import <unistd.h>
-#import <string.h>
 
-// v1.4.7: exact v1.4.6 baseline plus post-login websocket/CDSI compatibility.
-// Registration, SPQR, /v2/keys, the chat.signal.org HTTP UA rewrite, and the
-// ExpirationNagView fix are intentionally unchanged. New work is limited to:
-// 1) modernizing legacy chat websocket authentication/host selection, and
-// 2) updating the stale CDSI MRENCLAVE constant in memory before discovery runs.
+// v1.4.8: exact v1.4.6 known-good login/banner baseline plus chat websocket only.
+// Registration, SPQR, /v1/registration, /v2/keys, REST UA handling, and the
+// ExpirationNagView fix are unchanged. This build only modernizes the legacy
+// /v1/websocket/ transport used for normal Signal messaging. No CDSI/contact-
+// discovery experiment is included.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
 
 static NSString *const workingUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.2";
-
-// Signal 7.19.1 embeds the first value in SignalServiceKit.
-// Signal 8.29's bundled LibSignalClient 0.102.0 contains the second value.
-static const char *oldCdsiMrEnclave = "0f6fd79cdfdaa5b2e6337f534d3baf999318b0c462a7ac1f41297a3e4b424a57";
-static const char *newCdsiMrEnclave = "15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b";
 static NSUInteger gTraceSequence = 0;
 
 static NSUInteger nextTraceSequence(void) {
@@ -306,217 +296,6 @@ static void logResponse(NSUInteger sequence,
     ]);
 }
 
-
-static NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
-                                             const char *oldText,
-                                             const char *newText) {
-    if (!imageNeedle || !oldText || !newText) return 0;
-
-    const size_t oldLength = strlen(oldText);
-    const size_t newLength = strlen(newText);
-    if (!oldLength || oldLength != newLength) return 0;
-
-    NSUInteger patchCount = 0;
-    const uint32_t imageCount = _dyld_image_count();
-
-    for (uint32_t imageIndex = 0; imageIndex < imageCount; imageIndex++) {
-        const char *imageName = _dyld_get_image_name(imageIndex);
-        if (!imageName || !strstr(imageName, imageNeedle)) continue;
-
-        const struct mach_header *rawHeader = _dyld_get_image_header(imageIndex);
-        if (!rawHeader || rawHeader->magic != MH_MAGIC_64) continue;
-
-        const struct mach_header_64 *header = (const struct mach_header_64 *)rawHeader;
-        const intptr_t slide = _dyld_get_image_vmaddr_slide(imageIndex);
-        const uint8_t *commandCursor = (const uint8_t *)(header + 1);
-
-        for (uint32_t commandIndex = 0; commandIndex < header->ncmds; commandIndex++) {
-            const struct load_command *loadCommand = (const struct load_command *)commandCursor;
-            if (loadCommand->cmd == LC_SEGMENT_64) {
-                const struct segment_command_64 *segment = (const struct segment_command_64 *)loadCommand;
-
-                if (!strcmp(segment->segname, "__TEXT") && segment->filesize >= oldLength) {
-                    uint8_t *segmentStart = (uint8_t *)(uintptr_t)(segment->vmaddr + (uint64_t)slide);
-                    const size_t segmentLength = (size_t)segment->filesize;
-
-                    for (size_t offset = 0; offset + oldLength <= segmentLength; offset++) {
-                        uint8_t *candidate = segmentStart + offset;
-                        if (memcmp(candidate, oldText, oldLength) != 0) continue;
-
-                        const vm_size_t pageSize = (vm_size_t)getpagesize();
-                        const vm_address_t address = (vm_address_t)(uintptr_t)candidate;
-                        const vm_address_t pageStart = address & ~(pageSize - 1);
-                        const vm_address_t pageEnd =
-                            (address + oldLength + pageSize - 1) & ~(pageSize - 1);
-                        const vm_size_t protectLength = pageEnd - pageStart;
-
-                        kern_return_t kr = vm_protect(
-                            mach_task_self(),
-                            pageStart,
-                            protectLength,
-                            FALSE,
-                            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY
-                        );
-                        if (kr != KERN_SUCCESS) {
-                            kr = vm_protect(
-                                mach_task_self(),
-                                pageStart,
-                                protectLength,
-                                FALSE,
-                                VM_PROT_READ | VM_PROT_WRITE
-                            );
-                        }
-
-                        if (kr == KERN_SUCCESS) {
-                            memcpy(candidate, newText, oldLength);
-                            patchCount++;
-                            (void)vm_protect(
-                                mach_task_self(),
-                                pageStart,
-                                protectLength,
-                                FALSE,
-                                segment->initprot
-                            );
-                            offset += oldLength - 1;
-                        }
-                    }
-                }
-            }
-
-            if (loadCommand->cmdsize == 0) break;
-            commandCursor += loadCommand->cmdsize;
-        }
-    }
-
-    return patchCount;
-}
-
-static BOOL isWebSocketCompatHost(NSString *host) {
-    NSString *h = host.lowercaseString ?: @"";
-    return [h isEqualToString:@"chat.signal.org"] ||
-           [h isEqualToString:@"ud-chat.signal.org"] ||
-           [h isEqualToString:@"cdsi.signal.org"];
-}
-
-static NSString *safeWebSocketPath(NSURL *url) {
-    NSString *path = url.path ?: @"/";
-    if ([url.host.lowercaseString isEqualToString:@"cdsi.signal.org"]) {
-        NSRange range = [path rangeOfString:@"/v1/"];
-        NSRange suffix = [path rangeOfString:@"/discovery" options:NSBackwardsSearch];
-        if (range.location != NSNotFound && suffix.location != NSNotFound && suffix.location > NSMaxRange(range)) {
-            return @"/v1/<enclave>/discovery";
-        }
-    }
-    return path;
-}
-
-static void copyConfiguredHeaders(id sessionObject, NSMutableURLRequest *request) {
-    if (![sessionObject isKindOfClass:NSURLSession.class]) return;
-
-    NSURLSessionConfiguration *configuration = ((NSURLSession *)sessionObject).configuration;
-    NSDictionary *headers = configuration.HTTPAdditionalHeaders;
-    if (![headers isKindOfClass:NSDictionary.class]) return;
-
-    [headers enumerateKeysAndObjectsUsingBlock:^(id keyObject, id valueObject, BOOL *stop) {
-        NSString *key = [keyObject description];
-        NSString *value = [valueObject description];
-        if (key.length && value.length) {
-            [request setValue:value forHTTPHeaderField:key];
-        }
-    }];
-}
-
-static NSMutableURLRequest *modernizeWebSocketRequest(id sessionObject,
-                                                       NSURLRequest *sourceRequest,
-                                                       NSURL *sourceURL) {
-    NSURL *url = sourceRequest.URL ?: sourceURL;
-    if (!url || !isWebSocketCompatHost(url.host)) return nil;
-
-    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
-    if (!components) return nil;
-
-    NSString *originalHost = components.host.lowercaseString ?: @"";
-    BOOL movedLegacyUdHost = NO;
-    BOOL movedQueryAuth = NO;
-    BOOL updatedCdsiPath = NO;
-    NSString *login = nil;
-    NSString *password = nil;
-
-    if ([originalHost isEqualToString:@"ud-chat.signal.org"]) {
-        components.host = @"chat.signal.org";
-        movedLegacyUdHost = YES;
-    }
-
-    NSString *path = components.path ?: @"";
-    if ([originalHost isEqualToString:@"cdsi.signal.org"] &&
-        [path containsString:[NSString stringWithUTF8String:oldCdsiMrEnclave]]) {
-        components.path = [path stringByReplacingOccurrencesOfString:
-            [NSString stringWithUTF8String:oldCdsiMrEnclave]
-            withString:[NSString stringWithUTF8String:newCdsiMrEnclave]];
-        updatedCdsiPath = YES;
-    }
-
-    NSString *effectiveHost = components.host.lowercaseString ?: @"";
-    if ([effectiveHost isEqualToString:@"chat.signal.org"] &&
-        [components.path.lowercaseString isEqualToString:@"/v1/websocket/"]) {
-        NSMutableArray<NSURLQueryItem *> *remainingItems = [NSMutableArray array];
-        for (NSURLQueryItem *item in components.queryItems ?: @[]) {
-            NSString *name = item.name.lowercaseString;
-            if ([name isEqualToString:@"login"]) {
-                login = item.value;
-                movedQueryAuth = YES;
-                continue;
-            }
-            if ([name isEqualToString:@"password"]) {
-                password = item.value;
-                movedQueryAuth = YES;
-                continue;
-            }
-            [remainingItems addObject:item];
-        }
-        components.queryItems = remainingItems.count ? remainingItems : nil;
-    }
-
-    NSURL *finalURL = components.URL ?: url;
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:finalURL];
-    request.HTTPMethod = sourceRequest.HTTPMethod ?: @"GET";
-
-    copyConfiguredHeaders(sessionObject, request);
-
-    for (NSString *key in sourceRequest.allHTTPHeaderFields ?: @{}) {
-        NSString *value = sourceRequest.allHTTPHeaderFields[key];
-        if (key.length && value.length) {
-            [request setValue:value forHTTPHeaderField:key];
-        }
-    }
-
-    [request setValue:workingUserAgent forHTTPHeaderField:@"User-Agent"];
-
-    if (login.length && password.length) {
-        NSString *credentials = [NSString stringWithFormat:@"%@:%@", login, password];
-        NSData *credentialData = [credentials dataUsingEncoding:NSUTF8StringEncoding];
-        NSString *encoded = [credentialData base64EncodedStringWithOptions:0];
-        if (encoded.length) {
-            [request setValue:[@"Basic " stringByAppendingString:encoded]
-           forHTTPHeaderField:@"Authorization"];
-        }
-    }
-
-    appendTrace([NSString stringWithFormat:
-        @"[%@] WEBSOCKET %@%@ host=%@->%@ path=%@ auth=%@ ua=8.29 cdsiPath=%@",
-        timestamp(),
-        sourceRequest ? @"request" : @"url",
-        movedLegacyUdHost ? @"+host" : @"",
-        originalHost.length ? originalHost : @"?",
-        finalURL.host ?: @"?",
-        safeWebSocketPath(finalURL),
-        movedQueryAuth ? @"query->basic" : @"unchanged",
-        updatedCdsiPath ? @"updated" : @"unchanged"
-    ]);
-
-    return request;
-}
-
 typedef NSURLSessionUploadTask *(*UploadDataFn)(id, SEL, NSURLRequest *, NSData *);
 typedef NSURLSessionUploadTask *(*UploadDataCompletionFn)(id, SEL, NSURLRequest *, NSData *,
                                                            void (^)(NSData *, NSURLResponse *, NSError *));
@@ -528,12 +307,6 @@ static UploadDataFn originalUploadData;
 static UploadDataCompletionFn originalUploadDataCompletion;
 static DataRequestFn originalDataRequest;
 static DataRequestCompletionFn originalDataRequestCompletion;
-
-typedef NSURLSessionWebSocketTask *(*WebSocketURLFn)(id, SEL, NSURL *);
-typedef NSURLSessionWebSocketTask *(*WebSocketRequestFn)(id, SEL, NSURLRequest *);
-
-static WebSocketURLFn originalWebSocketURL;
-static WebSocketRequestFn originalWebSocketRequest;
 
 static NSURLSessionUploadTask *uploadData(id self, SEL sel, NSURLRequest *request, NSData *data) {
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
@@ -606,20 +379,132 @@ static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLReques
 }
 
 
+typedef NSURLSessionWebSocketTask *(*WebSocketURLFn)(id, SEL, NSURL *);
+typedef NSURLSessionWebSocketTask *(*WebSocketRequestFn)(id, SEL, NSURLRequest *);
+
+static WebSocketURLFn originalWebSocketURL;
+static WebSocketRequestFn originalWebSocketRequest;
+
+static BOOL isLegacyChatWebSocketURL(NSURL *url) {
+    if (!url) return NO;
+    NSString *host = url.host.lowercaseString ?: @"";
+    NSString *path = url.path.lowercaseString ?: @"";
+    BOOL chatHost = [host isEqualToString:@"chat.signal.org"] ||
+                    [host isEqualToString:@"ud-chat.signal.org"];
+    BOOL chatPath = [path isEqualToString:@"/v1/websocket"] ||
+                    [path isEqualToString:@"/v1/websocket/"];
+    return chatHost && chatPath;
+}
+
+static void copySessionHeaders(id sessionObject, NSMutableURLRequest *request) {
+    if (![sessionObject isKindOfClass:NSURLSession.class]) return;
+
+    NSDictionary *headers = ((NSURLSession *)sessionObject).configuration.HTTPAdditionalHeaders;
+    if (![headers isKindOfClass:NSDictionary.class]) return;
+
+    [headers enumerateKeysAndObjectsUsingBlock:^(id keyObject, id valueObject, BOOL *stop) {
+        NSString *key = [keyObject description];
+        NSString *value = [valueObject description];
+        if (key.length && value.length) {
+            [request setValue:value forHTTPHeaderField:key];
+        }
+    }];
+}
+
+static NSMutableURLRequest *modernizeChatWebSocket(id sessionObject,
+                                                    NSURLRequest *sourceRequest,
+                                                    NSURL *sourceURL) {
+    NSURL *url = sourceRequest.URL ?: sourceURL;
+    if (!isLegacyChatWebSocketURL(url)) return nil;
+
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if (!components) return nil;
+
+    NSString *originalHost = components.host.lowercaseString ?: @"";
+    BOOL movedUdHost = NO;
+
+    // Signal 7.19.1 has a separate anonymous socket at ud-chat.signal.org.
+    // That hostname is retired; current Signal uses the unified chat service.
+    if ([originalHost isEqualToString:@"ud-chat.signal.org"]) {
+        components.host = @"chat.signal.org";
+        movedUdHost = YES;
+    }
+
+    NSString *login = nil;
+    NSString *password = nil;
+    NSMutableArray<NSURLQueryItem *> *remaining = [NSMutableArray array];
+
+    for (NSURLQueryItem *item in components.queryItems ?: @[]) {
+        NSString *name = item.name.lowercaseString;
+        if ([name isEqualToString:@"login"]) {
+            login = item.value;
+            continue;
+        }
+        if ([name isEqualToString:@"password"]) {
+            password = item.value;
+            continue;
+        }
+        [remaining addObject:item];
+    }
+
+    BOOL hadLegacyQueryAuth = login.length || password.length;
+    components.queryItems = remaining.count ? remaining : nil;
+
+    NSURL *finalURL = components.URL ?: url;
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:finalURL];
+    request.HTTPMethod = sourceRequest.HTTPMethod ?: @"GET";
+
+    // Old Signal moves websocket headers to URLSessionConfiguration because it
+    // normally creates the task from URL only. Preserve those headers first.
+    copySessionHeaders(sessionObject, request);
+
+    for (NSString *key in sourceRequest.allHTTPHeaderFields ?: @{}) {
+        NSString *value = sourceRequest.allHTTPHeaderFields[key];
+        if (key.length && value.length) {
+            [request setValue:value forHTTPHeaderField:key];
+        }
+    }
+
+    // Use the same server-facing identity that is already proven for the REST
+    // registration/key-upload path.
+    [request setValue:workingUserAgent forHTTPHeaderField:@"User-Agent"];
+
+    // Current Signal-Server authenticates the identified websocket with HTTP
+    // Basic Authorization rather than login/password URL query parameters.
+    if (login.length && password.length) {
+        NSString *credentials = [NSString stringWithFormat:@"%@:%@", login, password];
+        NSData *credentialData = [credentials dataUsingEncoding:NSUTF8StringEncoding];
+        NSString *encoded = [credentialData base64EncodedStringWithOptions:0];
+        if (encoded.length) {
+            [request setValue:[@"Basic " stringByAppendingString:encoded]
+           forHTTPHeaderField:@"Authorization"];
+        }
+    }
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] CHAT-WEBSOCKET host=%@->%@ path=%@ auth=%@ ua=8.29",
+        timestamp(),
+        originalHost.length ? originalHost : @"?",
+        finalURL.host ?: @"?",
+        finalURL.path ?: @"/",
+        (login.length && password.length) ? @"query->basic" :
+            (hadLegacyQueryAuth ? @"incomplete-query" : @"anonymous")
+    ]);
+
+    return request;
+}
 
 static NSURLSessionWebSocketTask *webSocketRequestTask(id self, SEL sel, NSURLRequest *request) {
-    NSMutableURLRequest *rewritten = modernizeWebSocketRequest(self, request, nil);
+    NSMutableURLRequest *rewritten = modernizeChatWebSocket(self, request, nil);
     return originalWebSocketRequest(self, sel, rewritten ?: request);
 }
 
 static NSURLSessionWebSocketTask *webSocketURLTask(id self, SEL sel, NSURL *url) {
-    if (isWebSocketCompatHost(url.host) && originalWebSocketRequest) {
-        NSMutableURLRequest *rewritten = modernizeWebSocketRequest(self, nil, url);
+    if (isLegacyChatWebSocketURL(url) && originalWebSocketRequest) {
+        NSMutableURLRequest *rewritten = modernizeChatWebSocket(self, nil, url);
         if (rewritten) {
-            // Old Signal deliberately created websocket tasks from URL only and moved
-            // headers into NSURLSessionConfiguration. Current Signal requires Basic
-            // Authorization for the authenticated websocket, so create this one task
-            // from a request while preserving the same NSURLSession/delegate.
+            // Build this websocket from a request so the Authorization and
+            // corrected User-Agent headers reach the upgrade request.
             return originalWebSocketRequest(self, @selector(webSocketTaskWithRequest:), rewritten);
         }
     }
@@ -631,7 +516,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.4.7 keeps the v1.4.6 behavior and prevents this reminder view from becoming visible; it does
+    // v1.4.8 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -650,23 +535,11 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.7 registration trace\nApp: %@ (%@)\niOS: %@\nBaseline: v1.4.6 login/banner preserved. Added chat websocket modernization + CDSI enclave compatibility.\nSensitive values are redacted.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.8 registration trace\nApp: %@ (%@)\niOS: %@\nBaseline: v1.4.6 registration/banner behavior preserved. Added chat /v1/websocket/ compatibility only.\nSensitive values are redacted.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
             NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?"
-        ]);
-
-        NSUInteger cdsiPatchCount = patchCStringInLoadedImage(
-            "SignalServiceKit.framework/SignalServiceKit",
-            oldCdsiMrEnclave,
-            newCdsiMrEnclave
-        );
-        appendTrace([NSString stringWithFormat:
-            @"CDSI enclave compatibility: %@ (%lu occurrence%@ patched).",
-            cdsiPatchCount ? @"ready" : @"old constant not found",
-            (unsigned long)cdsiPatchCount,
-            cdsiPatchCount == 1 ? @"" : @"s"
         ]);
 
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
@@ -709,7 +582,7 @@ __attribute__((constructor)) static void start(void) {
                 (IMP *)&originalWebSocketURL);
 
         appendTrace([NSString stringWithFormat:
-            @"WebSocket hooks: URL=%@ request=%@.",
+            @"Chat websocket hooks: URL=%@ request=%@.",
             originalWebSocketURL ? @"yes" : @"no",
             originalWebSocketRequest ? @"yes" : @"no"
         ]);
