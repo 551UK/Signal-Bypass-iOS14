@@ -2,21 +2,23 @@
 
 Experimental rootful compatibility tweak for **Signal 7.19.1 (208) on iOS 14**.
 
-## Version 0.5.0: registration 499 follow-up
+## Version 0.7.0: persist the working 8.29 identity
 
-The v0.4.0 device result is useful: registration first shows **“Something went wrong”**, and only after dismissing it does Signal show **“Update Required.”** That matches Signal 7.19.1's source path for a service error such as HTTP 499: the registration request maps the unknown status to a generic error, while Signal separately marks the app version as remotely expired. On the next registration step, `appExpiry.isExpired` produces the update banner.
+The previous builds changed Signal's version mostly at runtime. That left a gap: Signal 7.19.1's `AppVersionImpl` is pure Swift and constructs `currentAppVersion` directly from the app bundle. The registration stack then uses that value when it creates its own User-Agent and expiry state.
 
-v0.5.0 keeps the **v0.3.0 launch-working baseline** and does not restore the NSProcessInfo iOS-10000 hook.
+v0.7.0 therefore applies the version at the source instead of depending on a later Objective-C hook.
 
-Changes:
+On install it backs up the original metadata, then writes the exact values from the supplied working **Signal 8.29 (1866)** IPA:
 
-- Uses local synthetic build **8.29.0.1868**, isolating it from remote-expiry state persisted by the 1866/1867 test builds.
-- Forces the exact supplied working 8.29 network identity, `Signal-iOS/8.29.0.1866 iOS/16.3`, in two places: while NSMutableURLRequest headers are written and again when NSURLSession tasks are created.
-- Records the outgoing Signal User-Agent before/after the task hook and the returned HTTP status in `SignalBypass14-startup.log`; no phone number, request body, token or URL path is logged.
-- If Signal still receives **499**, it is exposed to the old app as **400**, not 200. This prevents 7.19.1 from persisting a second “Update Required” lock while preserving the fact that the registration request failed. A rejected response is never fabricated as successful.
-- Hooks the resolved `AppExpiryImpl` Objective-C class directly as supplementary local-expiry coverage.
+- `CFBundleShortVersionString = 8.29`
+- `CFBundleVersion = 1866`
+- the matching 8.29 `BuildDetails` timestamp, commit and Xcode version
 
-The important test is whether the first registration request now stops returning 499. If it succeeds, Signal can proceed to the actual SMS/session flow. If it still fails, send `Documents/SignalBypass14-startup.log`; the new log will show the Signal host, status and User-Agent without exposing the phone number.
+The app binary is still Signal 7.19.1 and `MinimumOSVersion` is left at 14.0. The v0.3 launch fix remains unchanged: the NSProcessInfo iOS-10000 spoof is not restored.
+
+This is intentionally different from v0.4-v0.6: Signal's own Swift version object should now initialize as **8.29.0.1866**, so registration should create the current identity itself rather than us trying to rewrite it later in Foundation.
+
+Uninstall restores the original 7.19.1 (208) metadata.
 
 ## Install
 

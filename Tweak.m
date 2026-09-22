@@ -9,10 +9,10 @@
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
 static NSString *const targetVersion = @"8.29";
-static NSString *const targetBuild = @"1869"; // local-only: isolates persisted remote-expiry state from earlier tests
+static NSString *const targetBuild = @"1866"; // exact build from the supplied working Signal 8.29 IPA
 static NSString *const targetOS = @"16.3";
 static NSString *const networkUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.3";
-static const NSTimeInterval futureTimestamp = 4070908800.0; // 2099-01-01 UTC
+static const NSTimeInterval futureTimestamp = 1789506082.0; // exact Signal 8.29 build timestamp
 static id (*originalObject)(id, SEL, NSString *);
 static NSDictionary *(*originalInfo)(id, SEL);
 
@@ -30,7 +30,9 @@ static id replacementValue(NSString *key, id value) {
     if ([key isEqualToString:@"BuildDetails"] && [value isKindOfClass:NSDictionary.class]) {
         NSMutableDictionary *details = [value mutableCopy];
         details[@"Timestamp"] = @(futureTimestamp);
-        details[@"DateTime"] = @"Thu Jan 01 00:00:00 UTC 2099";
+        details[@"DateTime"] = @"Tue Sep 15 21:01:22 UTC 2026";
+        details[@"SignalCommit"] = @"3188f61b17c4b4caa837ab52a0babab5b9fd6423 Feature flags for .production.";
+        details[@"XCodeVersion"] = @"2600.2660";
         return details;
     }
     return value;
@@ -111,7 +113,7 @@ static void rememberResponse(NSURLResponse *response) {
 static NSString *diagnosticSummary(void) {
     @synchronized (NSURLSession.class) {
         NSString *status = lastHTTPStatus >= 0 ? [NSString stringWithFormat:@"%ld", (long)lastHTTPStatus] : @"none";
-        return [NSString stringWithFormat:@"SB14 v0.6 • req=%@ • %@ %@ • HTTP %@ • UA=%@",
+        return [NSString stringWithFormat:@"SB14 v0.7 • req=%@ • %@ %@ • HTTP %@ • UA=%@",
                 sawSignalRequest ? @"yes" : @"no",
                 lastRequestMethod ?: @"none",
                 lastRequestHost ?: @"none",
@@ -305,10 +307,11 @@ __attribute__((constructor)) static void start(void) {
         NSString *installedVersion = [main objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
         NSString *installedBuild = [main objectForInfoDictionaryKey:@"CFBundleVersion"];
         trace("kernel iOS14=%d; installed version=%s build=%s", isIOS14, installedVersion.UTF8String, installedBuild.UTF8String);
-        if (!isIOS14 || ![installedVersion isEqualToString:@"7.19.1"] ||
-            ![installedBuild isEqualToString:@"208"]) {
+        BOOL originalMetadata = [installedVersion isEqualToString:@"7.19.1"] && [installedBuild isEqualToString:@"208"];
+        BOOL spoofedMetadata = [installedVersion isEqualToString:@"8.29"] && [installedBuild isEqualToString:@"1866"];
+        if (!isIOS14 || (!originalMetadata && !spoofedMetadata)) {
             trace("inactive: unsupported OS/app version");
-            NSLog(@"[SignalBypass14] Inactive: requires iOS 14, Signal 7.19.1 (208)");
+            NSLog(@"[SignalBypass14] Inactive: requires iOS 14 with Signal 7.19.1 (208) or its v0.7 metadata spoof");
             return;
         }
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
@@ -332,6 +335,6 @@ __attribute__((constructor)) static void start(void) {
         install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
         installConcreteHTTPResponseHook();
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v0.6.0 active; local app 8.29.0.1869; concrete Foundation hooks + on-screen registration diagnostics; build date 2099-01-01");
+        NSLog(@"[SignalBypass14] v0.7.0 active; exact 8.29.0.1866 metadata persisted on disk; concrete Foundation hooks retained");
     }
 }

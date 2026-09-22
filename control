@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 0.6.0
+Version: 0.7.0
 Architecture: iphoneos-arm
-Description: Signal 7.19.1 registration/version compatibility for iOS 14.
+Description: Signal 7.19.1 iOS 14 compatibility with persisted Signal 8.29 registration metadata.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
