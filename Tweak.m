@@ -2,24 +2,48 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.4.0: minimal registration User-Agent fix.
-//
-// The successful iOS 16 trace showed:
-//   POST https://chat.signal.org/v1/verification/session
-//   User-Agent: Signal-iOS/8.29.0.1866 iOS/16.2
-//   HTTP 200
-//
-// The failing iOS 14 capture showed the same endpoint receiving the genuine
-// 7.19.1/iOS 14 identity and returning HTTP 499.
-//
-// This build therefore avoids the crash-prone pure-Swift expiry hooks from
-// v1.3.0 and changes only the final NSURLSession request immediately before
-// Signal sends registration traffic.
+// v1.4.1: keep the v1.4.0 final registration User-Agent rewrite and add
+// sanitized logging around the completion-handler requests Signal 7.19.1 uses.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
 
 static NSString *const workingUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.2";
+
+static NSString *tracePath(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/SignalBypass14-Registration.log"];
+}
+
+static void appendTrace(NSString *text) {
+    if (!text.length) return;
+    @synchronized (NSFileHandle.class) {
+        NSString *path = tracePath();
+        NSFileManager *fm = NSFileManager.defaultManager;
+        [fm createDirectoryAtPath:path.stringByDeletingLastPathComponent
+      withIntermediateDirectories:YES attributes:nil error:nil];
+        if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
+        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!h) return;
+        @try {
+            [h seekToEndOfFile];
+            [h writeData:[[text stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+            [h synchronizeFile];
+        } @catch (__unused NSException *e) {}
+        [h closeFile];
+    }
+}
+
+static NSString *timestamp(void) {
+    static NSDateFormatter *f;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        f = [NSDateFormatter new];
+        f.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        f.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+        f.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
+    });
+    return [f stringFromDate:[NSDate date]];
+}
 
 static BOOL isSignalHost(NSString *host) {
     NSString *h = host.lowercaseString ?: @"";
@@ -34,16 +58,122 @@ static BOOL isRegistrationRequest(NSURLRequest *request) {
     return [path containsString:@"/v1/verification/session"];
 }
 
+static NSString *safePath(NSURL *url) {
+    NSArray<NSString *> *parts = [url.path componentsSeparatedByString:@"/"];
+    NSMutableArray<NSString *> *out = [NSMutableArray arrayWithCapacity:parts.count];
+    BOOL redactNext = NO;
+    for (NSString *part in parts) {
+        if (!part.length) { [out addObject:part]; continue; }
+        if (redactNext) {
+            [out addObject:@"<session>"];
+            redactNext = NO;
+            continue;
+        }
+        [out addObject:part];
+        if ([part isEqualToString:@"session"]) redactNext = YES;
+    }
+    return [out componentsJoinedByString:@"/"];
+}
+
+static BOOL sensitiveKey(NSString *key) {
+    NSString *k = key.lowercaseString;
+    if ([k isEqualToString:@"id"] || [k isEqualToString:@"number"] ||
+        [k isEqualToString:@"e164"] || [k isEqualToString:@"code"]) return YES;
+
+    NSArray<NSString *> *needles = @[
+        @"token", @"password", @"credential", @"authorization", @"auth",
+        @"sessionid", @"session_id", @"verificationcode", @"captcha",
+        @"secret", @"identitykey", @"signedprekey", @"kyber"
+    ];
+    for (NSString *n in needles) if ([k containsString:n]) return YES;
+    return NO;
+}
+
+static id sanitizeJSON(id obj) {
+    if ([obj isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        [(NSDictionary *)obj enumerateKeysAndObjectsUsingBlock:^(id keyObj, id value, BOOL *stop) {
+            NSString *key = [keyObj description];
+            d[key] = sensitiveKey(key) ? @"<redacted>" : (sanitizeJSON(value) ?: [NSNull null]);
+        }];
+        return d;
+    }
+    if ([obj isKindOfClass:NSArray.class]) {
+        NSMutableArray *a = [NSMutableArray array];
+        for (id value in (NSArray *)obj) [a addObject:sanitizeJSON(value) ?: [NSNull null]];
+        return a;
+    }
+    if ([obj isKindOfClass:NSString.class]) {
+        NSString *s = obj;
+        if (s.length > 160) return [NSString stringWithFormat:@"<string %lu chars>", (unsigned long)s.length];
+        return s;
+    }
+    return obj ?: [NSNull null];
+}
+
+static NSString *safeBody(NSData *data) {
+    if (!data.length) return @"<none>";
+    if (data.length > 131072) return [NSString stringWithFormat:@"<%lu bytes omitted>", (unsigned long)data.length];
+
+    NSError *error = nil;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if (!json || error) return [NSString stringWithFormat:@"<non-JSON %lu bytes>", (unsigned long)data.length];
+
+    id clean = sanitizeJSON(json);
+    NSData *pretty = [NSJSONSerialization dataWithJSONObject:clean options:NSJSONWritingPrettyPrinted error:nil];
+    return pretty ? [[NSString alloc] initWithData:pretty encoding:NSUTF8StringEncoding] : @"<JSON unavailable>";
+}
+
+static NSString *headerValue(NSURLRequest *request, NSString *wanted) {
+    for (NSString *key in request.allHTTPHeaderFields) {
+        if ([key caseInsensitiveCompare:wanted] == NSOrderedSame) {
+            return request.allHTTPHeaderFields[key];
+        }
+    }
+    return nil;
+}
+
 static NSURLRequest *rewriteRegistrationIdentity(NSURLRequest *request) {
     if (!isRegistrationRequest(request)) return request;
 
     NSMutableURLRequest *copy = [request mutableCopy];
     [copy setValue:workingUserAgent forHTTPHeaderField:@"User-Agent"];
-
-    // Keep every other header, method, URL and body byte-for-byte as Signal
-    // created them. The working iOS 16 trace showed X-Signal-Agent is absent
-    // on the initial verification-session request, so this tweak does not add it.
     return copy;
+}
+
+static void logRequest(NSURLRequest *request) {
+    if (!isRegistrationRequest(request)) return;
+    appendTrace([NSString stringWithFormat:
+        @"[%@] REQUEST %@ https://%@%@\nUser-Agent: %@\nX-Signal-Agent: %@\nContent-Type: %@\nAccept-Language: %@",
+        timestamp(),
+        request.HTTPMethod ?: @"?",
+        request.URL.host ?: @"?",
+        safePath(request.URL),
+        headerValue(request, @"User-Agent") ?: @"<missing>",
+        headerValue(request, @"X-Signal-Agent") ?: @"<missing>",
+        headerValue(request, @"Content-Type") ?: @"<missing>",
+        headerValue(request, @"Accept-Language") ?: @"<missing>"
+    ]);
+}
+
+static void logResponse(NSURLRequest *request, NSURLResponse *response, NSData *data, NSError *error) {
+    if (!isRegistrationRequest(request)) return;
+
+    NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class]
+        ? ((NSHTTPURLResponse *)response).statusCode : -1;
+
+    NSString *err = error
+        ? [NSString stringWithFormat:@"%@/%ld", error.domain, (long)error.code]
+        : @"none";
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] RESPONSE HTTP %ld https://%@%@ error=%@\nBody: %@\n",
+        timestamp(), (long)status,
+        request.URL.host ?: @"?",
+        safePath(request.URL),
+        err,
+        safeBody(data)
+    ]);
 }
 
 typedef NSURLSessionUploadTask *(*UploadDataFn)(id, SEL, NSURLRequest *, NSData *);
@@ -59,21 +189,43 @@ static DataRequestFn originalDataRequest;
 static DataRequestCompletionFn originalDataRequestCompletion;
 
 static NSURLSessionUploadTask *uploadData(id self, SEL sel, NSURLRequest *request, NSData *data) {
-    return originalUploadData(self, sel, rewriteRegistrationIdentity(request), data);
+    NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
+    logRequest(rewritten);
+    return originalUploadData(self, sel, rewritten, data);
 }
 
 static NSURLSessionUploadTask *uploadDataCompletion(id self, SEL sel, NSURLRequest *request, NSData *data,
                                                      void (^completion)(NSData *, NSURLResponse *, NSError *)) {
-    return originalUploadDataCompletion(self, sel, rewriteRegistrationIdentity(request), data, completion);
+    NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
+    logRequest(rewritten);
+
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
+    ^(NSData *responseData, NSURLResponse *response, NSError *error) {
+        logResponse(rewritten, response, responseData, error);
+        if (completion) completion(responseData, response, error);
+    };
+
+    return originalUploadDataCompletion(self, sel, rewritten, data, wrapped);
 }
 
 static NSURLSessionDataTask *dataRequest(id self, SEL sel, NSURLRequest *request) {
-    return originalDataRequest(self, sel, rewriteRegistrationIdentity(request));
+    NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
+    logRequest(rewritten);
+    return originalDataRequest(self, sel, rewritten);
 }
 
 static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLRequest *request,
                                                     void (^completion)(NSData *, NSURLResponse *, NSError *)) {
-    return originalDataRequestCompletion(self, sel, rewriteRegistrationIdentity(request), completion);
+    NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
+    logRequest(rewritten);
+
+    void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
+    ^(NSData *responseData, NSURLResponse *response, NSError *error) {
+        logResponse(rewritten, response, responseData, error);
+        if (completion) completion(responseData, response, error);
+    };
+
+    return originalDataRequestCompletion(self, sel, rewritten, wrapped);
 }
 
 static void install(Class cls, SEL selector, IMP replacement, IMP *original) {
@@ -86,14 +238,21 @@ __attribute__((constructor)) static void start(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"org.whispersystems.signal"]) return;
 
+        [@"" writeToFile:tracePath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        appendTrace([NSString stringWithFormat:
+            @"SignalBypass14 v1.4.1 registration trace\nApp: %@ (%@)\niOS: %@\nSensitive values are redacted.\n",
+            [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
+            [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
+            NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?"
+        ]);
+
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
         hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
-        if (!hookMessage) return;
+        if (!hookMessage) {
+            appendTrace(@"MSHookMessageEx unavailable.");
+            return;
+        }
 
-        // Signal 7.19.1's OWSURLSession uses NSURLSession uploadTaskWithRequest:
-        // fromData: for registration. Hook the concrete Foundation session class
-        // so the User-Agent is replaced after Signal has finished preparing the
-        // request, not earlier where AppVersion can overwrite it again.
         Class sessionClass = [NSURLSession.sharedSession class];
 
         install(sessionClass,
@@ -115,5 +274,7 @@ __attribute__((constructor)) static void start(void) {
                 @selector(dataTaskWithRequest:completionHandler:),
                 (IMP)dataRequestCompletion,
                 (IMP *)&originalDataRequestCompletion);
+
+        appendTrace([NSString stringWithFormat:@"Hooks installed on %@.", NSStringFromClass(sessionClass)]);
     }
 }
