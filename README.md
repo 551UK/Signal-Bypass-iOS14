@@ -1,28 +1,34 @@
 # Signal Bypass iOS 14
 
-## Version 1.4.1: registration response trace
+## Version 1.4.2: side-by-side registration trace
 
-v1.4.0 removed the **Update Required** popup by forcing the final verification-session request User-Agent to the exact identity observed in the successful iOS 16 trace:
+This keeps the **v1.4.0 User-Agent fix** unchanged. That build removed the Update Required popup by forcing the final verification-session request to the exact identity observed in the successful iOS 16 trace:
 
 `Signal-iOS/8.29.0.1866 iOS/16.2`
 
-The remaining behavior is now **Something went wrong** followed by an endless verification spinner.
+v1.4.2 adds detailed, sanitized logging so the iOS 14 attempt can be compared directly with the successful iOS 16 registration flow:
 
-v1.4.1 keeps the same request rewrite and adds sanitized logging around Signal 7.19.1's actual completion-handler requests.
+`POST session -> PATCH session -> POST /code -> PUT /code`
 
-The log is written to:
+The log records for every verification-session request:
+
+- sequence number
+- method and redacted endpoint
+- original User-Agent before rewrite
+- final User-Agent after rewrite
+- X-Signal-Agent, Content-Type and Accept-Language
+- sanitized request JSON
+- real HTTP status
+- selected response headers
+- sanitized response JSON
+- network error domain/code
+
+Sensitive values are redacted, including phone number, session ID, push token, captcha token, verification code, credentials and authorization values.
+
+Log location:
 
 `Signal/Documents/SignalBypass14-Registration.log`
 
-It records:
-- request method and redacted verification-session path
-- final User-Agent
-- X-Signal-Agent / Content-Type / Accept-Language
-- real HTTP response status
-- sanitized JSON response body
+No HTTP status rewriting, private Swift expiry hooks, request-body changes or diagnostic popups are used.
 
-Phone numbers, session IDs, push tokens, verification codes, credentials and authorization values are redacted.
-
-No 499 rewriting, private Swift hooks, request-body rewriting or diagnostic popups are used.
-
-The local metadata identity advances to **8.29.0.1870** only so older cached expiry identities do not exactly match.
+The local metadata identity remains **8.29.0.1870** so this logging build does not change another variable while we diagnose the spinner.
