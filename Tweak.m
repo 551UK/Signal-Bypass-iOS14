@@ -8,11 +8,35 @@
 // v0.9 compile trigger 2
 
 
+
+static void writeRuntimeMarker(void) {
+    @autoreleasepool {
+        NSString *home = NSHomeDirectory();
+        NSString *documents = [home stringByAppendingPathComponent:@"Documents"];
+        (void)[NSFileManager.defaultManager createDirectoryAtPath:documents
+                                     withIntermediateDirectories:YES
+                                                      attributes:nil
+                                                           error:nil];
+        NSString *payload = [NSString stringWithFormat:
+            @"SignalBypass14 v1.0.3 runtime constructor loaded\nprocess=%@\npid=%d\nbundle=%@\n",
+            NSProcessInfo.processInfo.processName ?: @"<unknown>",
+            getpid(),
+            NSBundle.mainBundle.bundleIdentifier ?: @"<unknown>"];
+        NSArray<NSString *> *paths = @[
+            [documents stringByAppendingPathComponent:@"SignalBypass14-runtime-marker.txt"],
+            [NSTemporaryDirectory() stringByAppendingPathComponent:@"SignalBypass14-loaded.txt"],
+            @"/tmp/SignalBypass14-loaded.txt"
+        ];
+        for (NSString *path in paths) {
+            NSError *error = nil;
+            [payload writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error];
+        }
+    }
+}
+
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
-extern void MSHookMessageEx(Class, SEL, IMP, IMP *);
-extern void MSHookFunction(void *, void *, void **);
 static HookMessage hookMessage;
 static HookFunction hookFunction;
 static NSUInteger swiftHookCount;
@@ -200,7 +224,7 @@ static void showInjectionCanary(void) {
             hookMessage ? @"yes" : @"no",
             hookFunction ? @"yes" : @"no",
             (unsigned long)swiftHookCount];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.0.2 loaded"
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.0.3 loaded"
                                                                         message:message
                                                                  preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:nil]];
@@ -399,6 +423,7 @@ static void installConcreteHTTPResponseHook(void) {
 }
 
 __attribute__((constructor)) static void start(void) {
+    writeRuntimeMarker();
     startTrace();
     @autoreleasepool {
         trace("reading app metadata");
@@ -420,8 +445,9 @@ __attribute__((constructor)) static void start(void) {
             NSLog(@"[SignalBypass14] Inactive: requires iOS 14 with Signal 7.19.1 (208) or its spoofed 8.29 (1866) metadata");
             return;
         }
-        hookMessage = (HookMessage)&MSHookMessageEx;
-        hookFunction = (HookFunction)&MSHookFunction;
+        void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
+        hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
+        hookFunction = (HookFunction)dlsym(provider ?: RTLD_DEFAULT, "MSHookFunction");
         if (!hookMessage || !hookFunction) {
             trace("missing Substrate hook provider: message=%p function=%p", hookMessage, hookFunction);
             NSLog(@"[SignalBypass14] No compatible MSHookMessageEx/MSHookFunction provider");
@@ -443,6 +469,6 @@ __attribute__((constructor)) static void start(void) {
         install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
         installConcreteHTTPResponseHook();
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v1.0.2 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
+        NSLog(@"[SignalBypass14] v1.0.3 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
     }
 }
