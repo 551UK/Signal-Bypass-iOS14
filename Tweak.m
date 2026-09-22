@@ -2,11 +2,12 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.4.9: rebuilt directly from the proven v1.4.6 login/banner baseline.
-// No v1.4.7/v1.4.8 websocket experiments are included.
-// The only functional difference is the local bundle build identity/build date
-// applied by BuildDate.m, used to discard any persisted AppExpiry state for the
-// old spoofed build and reproduce the known-working future BuildDetails test.
+// v1.5.0: keep the proven registration/banner baseline and switch Signal 7.19.1
+// to the libsignal chat transport that already exists inside this app version.
+// The legacy SSK websocket endpoints are no longer completing on the user's
+// device. Signal 7.19.1 contains remote-config-backed UserDefaults switches for
+// libsignal identified/unidentified chat transport; force those switches before
+// ChatConnectionManagerImpl is constructed. No websocket URL/auth rewriting.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
@@ -384,7 +385,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.4.9 only prevents this reminder view from becoming visible; it does
+    // v1.5.0 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -401,9 +402,24 @@ __attribute__((constructor)) static void start(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"org.whispersystems.signal"]) return;
 
+        // Signal 7.19.1 already ships both the legacy SSKWebSocket transport and
+        // the newer LibSignalClient.Net transport. ChatConnectionManagerImpl
+        // reads these app-group defaults during its initializer, before RemoteConfig
+        // is available. Set them here so this launch constructs libsignal-backed
+        // identified and unidentified chat connections instead of the dead legacy
+        // chat.signal.org / ud-chat.signal.org websocket implementation.
+        NSUserDefaults *transportDefaults =
+            [[NSUserDefaults alloc] initWithSuiteName:@"group.org.whispersystems.signal.group"];
+        if (transportDefaults) {
+            [transportDefaults setBool:YES forKey:@"UseLibsignalForIdentifiedWebsocket"];
+            [transportDefaults setBool:YES forKey:@"UseLibsignalForUnidentifiedWebsocket"];
+            [transportDefaults setBool:NO forKey:@"EnableShadowingForUnidentifiedWebsocket"];
+            [transportDefaults synchronize];
+        }
+
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.9 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: verification -> POST /v1/registration (spqr=true) -> PUT /v2/keys. UA rewrite scope: all chat.signal.org requests.\nSensitive values are redacted.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.0 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: verification -> POST /v1/registration (spqr=true) -> PUT /v2/keys. Chat transport forced to libsignal for identified + unidentified connections. UA rewrite scope: all chat.signal.org NSURLSession requests.\nSensitive values are redacted.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
@@ -455,5 +471,10 @@ __attribute__((constructor)) static void start(void) {
         }
 
         appendTrace([NSString stringWithFormat:@"Hooks installed on %@.", NSStringFromClass(sessionClass)]);
+        appendTrace([NSString stringWithFormat:
+            @"Transport defaults: identified=%d unidentified=%d shadowing=%d",
+            transportDefaults ? [transportDefaults boolForKey:@"UseLibsignalForIdentifiedWebsocket"] : -1,
+            transportDefaults ? [transportDefaults boolForKey:@"UseLibsignalForUnidentifiedWebsocket"] : -1,
+            transportDefaults ? [transportDefaults boolForKey:@"EnableShadowingForUnidentifiedWebsocket"] : -1]);
     }
 }
