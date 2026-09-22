@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.5.4
+Version: 1.5.5
 Architecture: iphoneos-arm
-Description: Legacy websocket compatibility with safe protobuf request/status diagnostics; preserves the working registration and expiry baseline.
+Description: Signal send-stage compatibility test with restored CDSI enclave patch and safe HTTP/websocket diagnostics.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks

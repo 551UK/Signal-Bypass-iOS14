@@ -1,17 +1,28 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
+#import <mach/mach.h>
+#import <unistd.h>
+#import <string.h>
 
-// v1.5.4: v1.5.3 proved the websocket handshake is healthy (HTTP 101) and
-// encrypted frames move both directions. Keep that transport/auth baseline and
-// add a minimal parser for Signal's outer websocket protobuf envelope so we can
-// log request method/path + request id and response status only. Bodies,
-// headers, credentials and recipient identifiers remain excluded/redacted.
+// v1.5.5: v1.5.4 proved the websocket is healthy but the actual message-send
+// request never starts. Keep all working v1.5.4 transport/auth behavior, restore
+// the known Signal-8.29 CDSI enclave compatibility patch, and add content-safe
+// metadata tracing for every Signal HTTP task so we can see which pre-send stage
+// blocks before /v1/messages/<recipient>.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
 
 static NSString *const workingUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.2";
+
+// Signal 7.19.1's stale CDSI enclave measurement and the value bundled by
+// Signal 8.29. This patch previously matched one occurrence in SignalServiceKit.
+static const char *oldCdsiMrEnclave = "0f6fd79cdfdaa5b2e6337f534d3baf999318b0c462a7ac1f41297a3e4b424a57";
+static const char *newCdsiMrEnclave = "15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b";
+
 static NSUInteger gTraceSequence = 0;
 
 static NSUInteger nextTraceSequence(void) {
@@ -107,6 +118,90 @@ static NSString *safePath(NSURL *url) {
         if ([part isEqualToString:@"session"]) redactNext = YES;
     }
     return [out componentsJoinedByString:@"/"];
+}
+
+static NSString *safeNetworkPath(NSURL *url) {
+    if (!url) return @"?";
+
+    NSArray<NSString *> *parts = [url.path componentsSeparatedByString:@"/"];
+    NSMutableArray<NSString *> *out = [NSMutableArray arrayWithCapacity:parts.count];
+
+    NSSet<NSString *> *alwaysKeep = [NSSet setWithArray:@[
+        @"", @"v1", @"v2", @"v3", @"v4", @"api", @"queue", @"empty",
+        @"messages", @"keys", @"profile", @"devices", @"accounts", @"certificate",
+        @"delivery", @"attachments", @"form", @"upload", @"verification",
+        @"session", @"code", @"registration", @"usernames", @"discovery",
+        @"multi_recipient", @"spam", @"challenge", @"config"
+    ]];
+
+    BOOL redactNext = NO;
+    NSString *previous = nil;
+
+    for (NSString *part in parts) {
+        if (!part.length) {
+            [out addObject:part];
+            previous = part;
+            continue;
+        }
+
+        NSString *lower = part.lowercaseString;
+        BOOL looksSensitive = NO;
+
+        if (redactNext) {
+            looksSensitive = YES;
+            redactNext = NO;
+        } else if ([part hasPrefix:@"+"] ||
+                   part.length >= 24 ||
+                   [lower containsString:@"="]) {
+            looksSensitive = YES;
+        }
+
+        if (looksSensitive && ![alwaysKeep containsObject:lower]) {
+            [out addObject:@"<id>"];
+        } else {
+            [out addObject:part];
+        }
+
+        if ([lower isEqualToString:@"messages"] ||
+            [lower isEqualToString:@"profile"] ||
+            [lower isEqualToString:@"usernames"]) {
+            redactNext = YES;
+        }
+
+        previous = part;
+        (void)previous;
+    }
+
+    return [out componentsJoinedByString:@"/"];
+}
+
+static void logHttpRequestMetadata(NSURLRequest *request, NSData *body) {
+    if (!request || !isSignalHost(request.URL.host)) return;
+    appendTrace([NSString stringWithFormat:
+        @"[%@] HTTP-REQUEST %@ host=%@ path=%@ bodyBytes=%lu",
+        timestamp(),
+        request.HTTPMethod ?: @"?",
+        request.URL.host ?: @"?",
+        safeNetworkPath(request.URL),
+        (unsigned long)(body ?: request.HTTPBody).length]);
+}
+
+static void logHttpResponseMetadata(NSURLRequest *request,
+                                    NSURLResponse *response,
+                                    NSError *error) {
+    if (!request || !isSignalHost(request.URL.host)) return;
+
+    NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class]
+        ? ((NSHTTPURLResponse *)response).statusCode : -1;
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] HTTP-RESPONSE %@ host=%@ path=%@ status=%ld error=%@",
+        timestamp(),
+        request.HTTPMethod ?: @"?",
+        request.URL.host ?: @"?",
+        safeNetworkPath(request.URL),
+        (long)status,
+        error ? [NSString stringWithFormat:@"%@/%ld", error.domain, (long)error.code] : @"none"]);
 }
 
 static BOOL sensitiveKey(NSString *key) {
@@ -296,6 +391,95 @@ static void logResponse(NSUInteger sequence,
     ]);
 }
 
+
+static NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
+                                             const char *oldText,
+                                             const char *newText) {
+    if (!imageNeedle || !oldText || !newText) return 0;
+
+    const size_t oldLength = strlen(oldText);
+    const size_t newLength = strlen(newText);
+    if (!oldLength || oldLength != newLength) return 0;
+
+    NSUInteger patchCount = 0;
+    const uint32_t imageCount = _dyld_image_count();
+
+    for (uint32_t imageIndex = 0; imageIndex < imageCount; imageIndex++) {
+        const char *imageName = _dyld_get_image_name(imageIndex);
+        if (!imageName || !strstr(imageName, imageNeedle)) continue;
+
+        const struct mach_header *rawHeader = _dyld_get_image_header(imageIndex);
+        if (!rawHeader || rawHeader->magic != MH_MAGIC_64) continue;
+
+        const struct mach_header_64 *header = (const struct mach_header_64 *)rawHeader;
+        const intptr_t slide = _dyld_get_image_vmaddr_slide(imageIndex);
+        const uint8_t *commandCursor = (const uint8_t *)(header + 1);
+
+        for (uint32_t commandIndex = 0; commandIndex < header->ncmds; commandIndex++) {
+            const struct load_command *loadCommand = (const struct load_command *)commandCursor;
+
+            if (loadCommand->cmd == LC_SEGMENT_64) {
+                const struct segment_command_64 *segment =
+                    (const struct segment_command_64 *)loadCommand;
+
+                if (!strcmp(segment->segname, "__TEXT") && segment->filesize >= oldLength) {
+                    uint8_t *segmentStart =
+                        (uint8_t *)(uintptr_t)(segment->vmaddr + (uint64_t)slide);
+                    const size_t segmentLength = (size_t)segment->filesize;
+
+                    for (size_t offset = 0; offset + oldLength <= segmentLength; offset++) {
+                        uint8_t *candidate = segmentStart + offset;
+                        if (memcmp(candidate, oldText, oldLength) != 0) continue;
+
+                        const vm_size_t pageSize = (vm_size_t)getpagesize();
+                        const vm_address_t address = (vm_address_t)(uintptr_t)candidate;
+                        const vm_address_t pageStart = address & ~(pageSize - 1);
+                        const vm_address_t pageEnd =
+                            (address + oldLength + pageSize - 1) & ~(pageSize - 1);
+                        const vm_size_t protectLength = pageEnd - pageStart;
+
+                        kern_return_t kr = vm_protect(
+                            mach_task_self(),
+                            pageStart,
+                            protectLength,
+                            FALSE,
+                            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY
+                        );
+
+                        if (kr != KERN_SUCCESS) {
+                            kr = vm_protect(
+                                mach_task_self(),
+                                pageStart,
+                                protectLength,
+                                FALSE,
+                                VM_PROT_READ | VM_PROT_WRITE
+                            );
+                        }
+
+                        if (kr == KERN_SUCCESS) {
+                            memcpy(candidate, newText, oldLength);
+                            patchCount++;
+                            (void)vm_protect(
+                                mach_task_self(),
+                                pageStart,
+                                protectLength,
+                                FALSE,
+                                segment->initprot
+                            );
+                            offset += oldLength - 1;
+                        }
+                    }
+                }
+            }
+
+            if (loadCommand->cmdsize == 0) break;
+            commandCursor += loadCommand->cmdsize;
+        }
+    }
+
+    return patchCount;
+}
+
 typedef NSURLSessionUploadTask *(*UploadDataFn)(id, SEL, NSURLRequest *, NSData *);
 typedef NSURLSessionUploadTask *(*UploadDataCompletionFn)(id, SEL, NSURLRequest *, NSData *,
                                                            void (^)(NSData *, NSURLResponse *, NSError *));
@@ -312,6 +496,7 @@ static NSURLSessionUploadTask *uploadData(id self, SEL sel, NSURLRequest *reques
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
     NSData *finalData = rewriteAccountRegistrationBody(rewritten, data);
     NSUInteger sequence = nextTraceSequence();
+    logHttpRequestMetadata(rewritten, finalData);
     logRequest(sequence, request, rewritten, finalData);
     if (isAccountRegistrationRequest(rewritten) && finalData != data) {
         appendTrace([NSString stringWithFormat:@"[%@] [R%03lu] Injected-Capability: spqr=true",
@@ -325,6 +510,7 @@ static NSURLSessionUploadTask *uploadDataCompletion(id self, SEL sel, NSURLReque
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
     NSData *finalData = rewriteAccountRegistrationBody(rewritten, data);
     NSUInteger sequence = nextTraceSequence();
+    logHttpRequestMetadata(rewritten, finalData);
     logRequest(sequence, request, rewritten, finalData);
     if (isAccountRegistrationRequest(rewritten) && finalData != data) {
         appendTrace([NSString stringWithFormat:@"[%@] [R%03lu] Injected-Capability: spqr=true",
@@ -333,6 +519,7 @@ static NSURLSessionUploadTask *uploadDataCompletion(id self, SEL sel, NSURLReque
 
     void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
     ^(NSData *responseData, NSURLResponse *response, NSError *error) {
+        logHttpResponseMetadata(rewritten, response, error);
         logResponse(sequence, rewritten, response, responseData, error);
         if (completion) completion(responseData, response, error);
     };
@@ -351,6 +538,7 @@ static NSURLSessionDataTask *dataRequest(id self, SEL sel, NSURLRequest *request
         }
     }
     NSUInteger sequence = nextTraceSequence();
+    logHttpRequestMetadata(rewritten, rewritten.HTTPBody);
     logRequest(sequence, request, rewritten, rewritten.HTTPBody);
     return originalDataRequest(self, sel, rewritten);
 }
@@ -367,10 +555,12 @@ static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLReques
         }
     }
     NSUInteger sequence = nextTraceSequence();
+    logHttpRequestMetadata(rewritten, rewritten.HTTPBody);
     logRequest(sequence, request, rewritten, rewritten.HTTPBody);
 
     void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
     ^(NSData *responseData, NSURLResponse *response, NSError *error) {
+        logHttpResponseMetadata(rewritten, response, error);
         logResponse(sequence, rewritten, response, responseData, error);
         if (completion) completion(responseData, response, error);
     };
@@ -932,6 +1122,11 @@ static void tracedOWSTaskDidComplete(id self,
             webSocketTaskTarget(task),
             (long)status,
             error ? [NSString stringWithFormat:@"%@/%ld", error.domain, (long)error.code] : @"none"]);
+    } else {
+        NSURLRequest *request = task.currentRequest ?: task.originalRequest;
+        if (request && isSignalHost(request.URL.host)) {
+            logHttpResponseMetadata(request, task.response, error);
+        }
     }
     originalOWSTaskDidComplete(self, sel, session, task, error);
 }
@@ -941,7 +1136,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.4 only prevents this reminder view from becoming visible; it does
+    // v1.5.5 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -972,12 +1167,23 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.4 websocket trace\nApp: %@ (%@)\niOS: %@\nTransport/auth from v1.5.3 retained. Added protobuf envelope metadata: request id/method/redacted path and response status only; bodies, headers, credentials and recipient identifiers are not logged.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.5 send-stage trace\nApp: %@ (%@)\niOS: %@\nV1.5.4 websocket transport/auth retained. CDSI 8.29 enclave compatibility restored. Added content-safe metadata tracing for all Signal HTTP tasks plus websocket request/status tracing.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
             NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?"
         ]);
+
+        NSUInteger cdsiPatchCount = patchCStringInLoadedImage(
+            "SignalServiceKit.framework/SignalServiceKit",
+            oldCdsiMrEnclave,
+            newCdsiMrEnclave
+        );
+        appendTrace([NSString stringWithFormat:
+            @"CDSI enclave compatibility: %@ (%lu occurrence%@ patched).",
+            cdsiPatchCount ? @"ready" : @"old constant not found",
+            (unsigned long)cdsiPatchCount,
+            cdsiPatchCount == 1 ? @"" : @"s"]);
 
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
         hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
