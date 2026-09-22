@@ -14,31 +14,6 @@
 
 
 
-static void writeRuntimeMarker(void) {
-    const char *home = getenv("HOME");
-    if (!home) return;
-
-    char path[PATH_MAX];
-    int length = snprintf(path, sizeof(path), "%s/Documents/SignalBypass14-runtime-marker.txt", home);
-    if (length <= 0 || length >= (int)sizeof(path)) return;
-
-    int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW, 0600);
-    if (fd < 0) return;
-
-    const char *process = getprogname();
-    char payload[256];
-    int payloadLength = snprintf(payload, sizeof(payload),
-        "SignalBypass14 v1.0.4 runtime constructor loaded\nprocess=%s\npid=%d\n",
-        process ? process : "<unknown>", getpid());
-
-    if (payloadLength > 0) {
-        size_t bytes = (size_t)payloadLength < sizeof(payload) ? (size_t)payloadLength : sizeof(payload) - 1;
-        (void)write(fd, payload, bytes);
-        (void)fsync(fd);
-    }
-    (void)close(fd);
-}
-
 // Resolve the jailbreak's hook provider at runtime, without SDK-specific headers.
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
@@ -201,45 +176,6 @@ static NSString *diagnosticSummary(void) {
     }
 }
 
-
-static UIViewController *topVisibleController(void) {
-    UIWindow *window = nil;
-    for (UIWindow *candidate in UIApplication.sharedApplication.windows) {
-        if (!candidate.hidden && candidate.alpha > 0.0) {
-            window = candidate;
-            break;
-        }
-    }
-    UIViewController *controller = window.rootViewController;
-    while (controller.presentedViewController) controller = controller.presentedViewController;
-    if ([controller isKindOfClass:UINavigationController.class]) {
-        UIViewController *visible = ((UINavigationController *)controller).visibleViewController;
-        if (visible) controller = visible;
-    }
-    if ([controller isKindOfClass:UITabBarController.class]) {
-        UIViewController *selected = ((UITabBarController *)controller).selectedViewController;
-        if (selected) controller = selected;
-    }
-    return controller;
-}
-
-static void showInjectionCanary(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"org.whispersystems.signal"]) return;
-        UIViewController *controller = topVisibleController();
-        if (!controller) return;
-        NSString *message = [NSString stringWithFormat:
-            @"Tweak injection confirmed.\nMSHookMessageEx: %@\nMSHookFunction: %@\nSwift hooks: %lu",
-            hookMessage ? @"yes" : @"no",
-            hookFunction ? @"yes" : @"no",
-            (unsigned long)swiftHookCount];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.1.0 loaded"
-                                                                        message:message
-                                                                 preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:nil]];
-        [controller presentViewController:alert animated:YES completion:nil];
-    });
-}
 
 static void (*originalSetHeaderValue)(id, SEL, NSString *, NSString *);
 static void setHeaderValue(id self, SEL sel, NSString *value, NSString *field) {
