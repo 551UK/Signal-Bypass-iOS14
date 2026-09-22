@@ -404,6 +404,7 @@ __attribute__((constructor)) static void start(void) {
         NSString *identifier = main.bundleIdentifier;
         if (![@[@"org.whispersystems.signal", @"org.whispersystems.signal.SignalNSE",
                 @"org.whispersystems.signal.shareextension"] containsObject:identifier]) return;
+        showInjectionCanary();
         // Capture genuine values before installing any hook.
         struct utsname kernel;
         BOOL isIOS14 = uname(&kernel) == 0 && strncmp(kernel.release, "20.", 3) == 0;
