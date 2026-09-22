@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.4.7
+Version: 1.4.8
 Architecture: iphoneos-arm
-Description: v1.4.6 known-good login/banner baseline plus legacy chat WebSocket modernization and current CDSI enclave compatibility for post-login contact discovery.
+Description: Exact v1.4.6 login/banner baseline plus legacy Signal chat WebSocket host/auth/User-Agent compatibility. No CDSI/contact-discovery experiment.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
