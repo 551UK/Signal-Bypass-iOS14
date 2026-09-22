@@ -2,9 +2,10 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// v1.4.3: keep the verified v1.4.x verification-session User-Agent rewrite,
-// extend the exact same final rewrite to POST /v1/registration after the
-// SMS code has been accepted, and preserve sanitized logs across launches.
+// v1.4.4: keep the verified session flow and final User-Agent rewrite.
+// The server now accepts the verification code but rejects POST /v1/registration
+// with 499 "Missing required device capability". This test adds only spqr=true
+// to accountAttributes.capabilities for that final account-creation request.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 static HookMessage hookMessage;
@@ -73,6 +74,12 @@ static BOOL isRegistrationRequest(NSURLRequest *request) {
     if ([path isEqualToString:@"/v1/registration"]) return YES;
 
     return NO;
+}
+
+static BOOL isAccountRegistrationRequest(NSURLRequest *request) {
+    if (!request || !isSignalHost(request.URL.host)) return NO;
+    NSString *path = request.URL.path.lowercaseString ?: @"";
+    return [path isEqualToString:@"/v1/registration"];
 }
 
 static NSString *safePath(NSURL *url) {
@@ -171,6 +178,42 @@ static NSString *responseHeaders(NSURLResponse *response) {
     return selected.description;
 }
 
+static NSData *rewriteAccountRegistrationBody(NSURLRequest *request, NSData *body) {
+    if (!isAccountRegistrationRequest(request) || !body.length) return body;
+
+    NSError *error = nil;
+    id root = [NSJSONSerialization JSONObjectWithData:body
+                                              options:NSJSONReadingMutableContainers
+                                                error:&error];
+    if (error || ![root isKindOfClass:NSMutableDictionary.class]) return body;
+
+    NSMutableDictionary *json = (NSMutableDictionary *)root;
+    id attrsObject = json[@"accountAttributes"];
+    if (![attrsObject isKindOfClass:NSMutableDictionary.class]) return body;
+
+    NSMutableDictionary *attrs = (NSMutableDictionary *)attrsObject;
+    id capsObject = attrs[@"capabilities"];
+    NSMutableDictionary *caps = nil;
+
+    if ([capsObject isKindOfClass:NSMutableDictionary.class]) {
+        caps = (NSMutableDictionary *)capsObject;
+    } else if ([capsObject isKindOfClass:NSDictionary.class]) {
+        caps = [capsObject mutableCopy];
+        attrs[@"capabilities"] = caps;
+    } else {
+        caps = [NSMutableDictionary dictionary];
+        attrs[@"capabilities"] = caps;
+    }
+
+    // Signal-Server currently requires this capability for new device creation.
+    // Change only this one field so we can test the next server-side gate without
+    // altering the verified session, account keys, auth, or any response.
+    caps[@"spqr"] = @YES;
+
+    NSData *rewritten = [NSJSONSerialization dataWithJSONObject:json options:0 error:&error];
+    return (!error && rewritten.length) ? rewritten : body;
+}
+
 static NSURLRequest *rewriteRegistrationIdentity(NSURLRequest *request) {
     if (!isRegistrationRequest(request)) return request;
 
@@ -250,16 +293,26 @@ static DataRequestCompletionFn originalDataRequestCompletion;
 
 static NSURLSessionUploadTask *uploadData(id self, SEL sel, NSURLRequest *request, NSData *data) {
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
+    NSData *finalData = rewriteAccountRegistrationBody(rewritten, data);
     NSUInteger sequence = nextTraceSequence();
-    logRequest(sequence, request, rewritten, data);
-    return originalUploadData(self, sel, rewritten, data);
+    logRequest(sequence, request, rewritten, finalData);
+    if (isAccountRegistrationRequest(rewritten) && finalData != data) {
+        appendTrace([NSString stringWithFormat:@"[%@] [R%03lu] Injected-Capability: spqr=true",
+                     timestamp(), (unsigned long)sequence]);
+    }
+    return originalUploadData(self, sel, rewritten, finalData);
 }
 
 static NSURLSessionUploadTask *uploadDataCompletion(id self, SEL sel, NSURLRequest *request, NSData *data,
                                                      void (^completion)(NSData *, NSURLResponse *, NSError *)) {
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
+    NSData *finalData = rewriteAccountRegistrationBody(rewritten, data);
     NSUInteger sequence = nextTraceSequence();
-    logRequest(sequence, request, rewritten, data);
+    logRequest(sequence, request, rewritten, finalData);
+    if (isAccountRegistrationRequest(rewritten) && finalData != data) {
+        appendTrace([NSString stringWithFormat:@"[%@] [R%03lu] Injected-Capability: spqr=true",
+                     timestamp(), (unsigned long)sequence]);
+    }
 
     void (^wrapped)(NSData *, NSURLResponse *, NSError *) =
     ^(NSData *responseData, NSURLResponse *response, NSError *error) {
@@ -267,11 +320,19 @@ static NSURLSessionUploadTask *uploadDataCompletion(id self, SEL sel, NSURLReque
         if (completion) completion(responseData, response, error);
     };
 
-    return originalUploadDataCompletion(self, sel, rewritten, data, wrapped);
+    return originalUploadDataCompletion(self, sel, rewritten, finalData, wrapped);
 }
 
 static NSURLSessionDataTask *dataRequest(id self, SEL sel, NSURLRequest *request) {
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
+    if (isAccountRegistrationRequest(rewritten) && rewritten.HTTPBody.length) {
+        NSData *body = rewriteAccountRegistrationBody(rewritten, rewritten.HTTPBody);
+        if (body != rewritten.HTTPBody) {
+            NSMutableURLRequest *copy = [rewritten mutableCopy];
+            copy.HTTPBody = body;
+            rewritten = copy;
+        }
+    }
     NSUInteger sequence = nextTraceSequence();
     logRequest(sequence, request, rewritten, rewritten.HTTPBody);
     return originalDataRequest(self, sel, rewritten);
@@ -280,6 +341,14 @@ static NSURLSessionDataTask *dataRequest(id self, SEL sel, NSURLRequest *request
 static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLRequest *request,
                                                     void (^completion)(NSData *, NSURLResponse *, NSError *)) {
     NSURLRequest *rewritten = rewriteRegistrationIdentity(request);
+    if (isAccountRegistrationRequest(rewritten) && rewritten.HTTPBody.length) {
+        NSData *body = rewriteAccountRegistrationBody(rewritten, rewritten.HTTPBody);
+        if (body != rewritten.HTTPBody) {
+            NSMutableURLRequest *copy = [rewritten mutableCopy];
+            copy.HTTPBody = body;
+            rewritten = copy;
+        }
+    }
     NSUInteger sequence = nextTraceSequence();
     logRequest(sequence, request, rewritten, rewritten.HTTPBody);
 
@@ -304,7 +373,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.3 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: POST session -> PATCH session -> POST /code -> PUT /code -> POST /v1/registration.\nSensitive values are redacted.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.4.4 registration trace\nApp: %@ (%@)\niOS: %@\nExpected flow: POST session -> PATCH session -> POST /code -> PUT /code -> POST /v1/registration (spqr=true).\nSensitive values are redacted.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
