@@ -90,7 +90,7 @@ static void rememberRequest(NSURLRequest *request) {
         sawSignalRequest = YES;
         lastRequestHost = [request.URL.host.lowercaseString copy];
         lastRequestMethod = [(request.HTTPMethod ?: @"REQUEST") copy];
-        lastRequestUA = [[request valueForHTTPHeaderField:@"User-Agent"] ?: @"<none>" copy];
+        lastRequestUA = [([request valueForHTTPHeaderField:@"User-Agent"] ?: @"<none>") copy];
     }
 }
 
