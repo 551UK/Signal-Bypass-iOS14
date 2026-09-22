@@ -167,13 +167,11 @@ static NSString *diagnosticSummary(void) {
 
 
 static UIViewController *topVisibleController(void) {
-    UIWindow *window = UIApplication.sharedApplication.keyWindow;
-    if (!window) {
-        for (UIWindow *candidate in UIApplication.sharedApplication.windows) {
-            if (!candidate.hidden && candidate.alpha > 0.0) {
-                window = candidate;
-                break;
-            }
+    UIWindow *window = nil;
+    for (UIWindow *candidate in UIApplication.sharedApplication.windows) {
+        if (!candidate.hidden && candidate.alpha > 0.0) {
+            window = candidate;
+            break;
         }
     }
     UIViewController *controller = window.rootViewController;
