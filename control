@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.4.9
+Version: 1.5.0
 Architecture: iphoneos-arm
-Description: v1.4.6 login/banner baseline with a fresh local AppExpiry identity and 2027 BuildDetails timestamp; no websocket experiment.
+Description: Signal iOS 14 compatibility build using the libsignal chat transport already present in Signal 7.19.1, while preserving the proven registration and banner fixes.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
