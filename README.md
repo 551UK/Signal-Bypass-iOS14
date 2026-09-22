@@ -2,22 +2,25 @@
 
 Experimental **rootful** compatibility tweak for Signal 7.19.1 (208) on iOS 14.
 
-## Version 1.0.0: rootful arm64e injection fix
+## Version 1.0.1: fix rootful dylib permissions
 
-The missing v0.9 canary changed the diagnosis. Comparing our package with the supplied FuckSignalExpiry 0.9.0 package found a concrete packaging difference:
+The previous build still did not inject. The rootful package comparison found the concrete cause in the DEB itself:
 
-- the known-working tweak dylib contains **arm64 + arm64e**
-- our previous SignalBypass14 dylib was compiled as **arm64 only**
-- the working package uses the same rootful path: `/Library/MobileSubstrate/DynamicLibraries`
-- both use package architecture `iphoneos-arm`
+- known-working FuckSignalExpiry dylib: **0755**
+- SignalBypass14 v1.0.0 dylib: **0644**
 
-On an A12-or-newer iPhone, Signal runs as arm64e. A rootful MobileSubstrate tweak without an arm64e slice may simply fail to inject, which matches the missing log and missing canary.
+The build script was applying `chmod 644` to every file in `/Library/MobileSubstrate/DynamicLibraries`, including the dylib. That is wrong for a rootful MobileSubstrate tweak.
 
-v1.0.0 therefore builds the tweak dylib as a universal **arm64 + arm64e** binary and CI verifies both slices before packaging. The visible **SB14 v1.0 loaded** popup remains so injection is obvious.
+v1.0.1 now packages:
 
-The existing Signal compatibility work is otherwise retained: the v0.3 launch fix, exact 8.29.0.1866 metadata, and the Swift registration expiry/challenge hooks.
+- `SignalBypass14.dylib` as **0755**
+- `SignalBypass14.plist` as **0644**
+- universal **arm64 + arm64e** dylib
+- rootful path `/Library/MobileSubstrate/DynamicLibraries`
 
-After install, fully close Signal, respring and open it. If **SB14 v1.0 loaded** appears, send a screenshot of that popup.
+CI verifies the dylib mode before packaging.
+
+After installing, fully close Signal, respring, then open it and wait about three seconds. You should see **SB14 v1.0.1 loaded**. If that appears, injection is finally confirmed and we can continue with the registration bypass itself.
 
 ## Build
 

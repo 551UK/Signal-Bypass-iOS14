@@ -24,7 +24,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.0.0-rootful
+          name: SignalBypass14-1.0.1-rootful
           path: build/*.deb
           if-no-files-found: error
       - name: Publish prerelease
@@ -38,8 +38,8 @@ jobs:
 
           Rootful architecture fix. The supplied FuckSignalExpiry package that previously injected successfully contains both arm64 and arm64e slices. Earlier SignalBypass14 builds contained only arm64, which can prevent MobileSubstrate from loading the dylib into an arm64e Signal process on A12-and-newer devices.
 
-          v1.0.0 now builds a universal arm64 + arm64e rootful dylib and verifies both slices in CI. The rootful /Library/MobileSubstrate/DynamicLibraries layout and iphoneos-arm package architecture remain unchanged because those already match the known-working reference package.
+          v1.0.1.1 now builds a universal arm64 + arm64e rootful dylib and verifies both slices in CI. The rootful /Library/MobileSubstrate/DynamicLibraries layout and iphoneos-arm package architecture remain unchanged because those already match the known-working reference package.
 
-          The visible "SB14 v1.0 loaded" canary remains so injection is obvious.
+          The visible "SB14 v1.0.1 loaded" canary remains so injection is obvious.
           NOTES
-          gh release create v1.0.0 build/uk.551.signalbypass14_1.0.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.0.0' --notes-file build/release-notes.md --prerelease
+          gh release create v1.0.1.1 build/uk.551.signalbypass14_1.0.1_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v1.0.1.1' --notes-file build/release-notes.md --prerelease

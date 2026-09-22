@@ -198,7 +198,7 @@ static void showInjectionCanary(void) {
             hookMessage ? @"yes" : @"no",
             hookFunction ? @"yes" : @"no",
             (unsigned long)swiftHookCount];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.0 loaded"
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"SB14 v1.0.1.1 loaded"
                                                                         message:message
                                                                  preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:nil]];
@@ -442,6 +442,6 @@ __attribute__((constructor)) static void start(void) {
         install(expiryClass, @"isExpired", (IMP)notExpired, NULL);
         installConcreteHTTPResponseHook();
         trace("compatibility hooks installed; constructor returning");
-        NSLog(@"[SignalBypass14] v1.0.0 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
+        NSLog(@"[SignalBypass14] v1.0.1 active; %lu pure-Swift registration hooks installed; exact 8.29.0.1866 metadata retained", (unsigned long)swiftHookCount);
     }
 }

@@ -26,7 +26,10 @@ chmod 755 package/usr package/usr/libexec package/usr/libexec/signalbypass14-bui
 cp build/SignalBypass14.dylib SignalBypass14.plist package/Library/MobileSubstrate/DynamicLibraries/
 cp control package/DEBIAN/control
 chmod 755 package package/DEBIAN package/Library package/Library/MobileSubstrate package/Library/MobileSubstrate/DynamicLibraries
-chmod 644 package/DEBIAN/control package/Library/MobileSubstrate/DynamicLibraries/*
-dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_1.0.0_iphoneos-arm.deb
+chmod 644 package/DEBIAN/control package/Library/MobileSubstrate/DynamicLibraries/SignalBypass14.plist
+chmod 755 package/Library/MobileSubstrate/DynamicLibraries/SignalBypass14.dylib
+DYLIB_MODE="$(stat -f '%Lp' package/Library/MobileSubstrate/DynamicLibraries/SignalBypass14.dylib)"
+[[ "$DYLIB_MODE" == "755" ]] || { echo "Bad rootful dylib mode: $DYLIB_MODE"; exit 1; }
+dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_1.0.1_iphoneos-arm.deb
 dpkg-deb --info build/*.deb
 dpkg-deb --contents build/*.deb
