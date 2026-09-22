@@ -86,7 +86,7 @@ __attribute__((constructor)) static void startTracer(void) {
         logLine([NSString stringWithFormat:@"Signal Registration Tracer 0.1.0\nApp: %@ (%@)\niOS: %@\n",
                  [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
                  [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
-                 UIDevice.currentDevice.systemVersion ?: @"?"]);
+                 NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?"]);
 
         NSURLSession *session = NSURLSession.sharedSession;
         Class sessionClass = [session class];
