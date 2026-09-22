@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - Tweak.m
+      - StartupDiagnostics.h
       - BuildDate.m
       - control
       - SignalBypass14.plist
@@ -23,7 +24,7 @@ jobs:
         run: bash scripts/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-0.2.0-rootful
+          name: SignalBypass14-0.3.0-rootful
           path: build/*.deb
           if-no-files-found: error
       - name: Publish prerelease
@@ -35,10 +36,10 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental build for Signal 7.19.1 (208), rootful iOS 14.
 
-          Combines the supplied expiry tweak's error-code and OS-version hooks with a persistent Info.plist build-date edit (matching Timestamp and DateTime for 1 January 2099). Retains app-version spoofing and limited diagnostics.
+          Startup diagnostic build. Removes the NSProcessInfo iOS 10000 hook, retains expiry/date and app-version changes, and records startup checkpoints without changing database, keychain or UI state.
 
-          Close Signal and remove FuckSignalExpiry before installing, then respring. Original build dates are backed up and restored on uninstall when unchanged by other edits. Signal account/database data is not deleted.
+          Fully close Signal, install and respring, open Signal once and leave it for 25 seconds. Send Documents/SignalBypass14-startup.log from Signal's data container using Filza. If it crashes, include its .ips report. No message text, credentials or request bodies are logged.
 
-          This is not device-validated. Black-screen, registration, messaging and call success are not confirmed; the reference setup reports failed calls.
+          Black-screen cause is not yet confirmed. This build is for locating the startup failure; it is not a confirmed fix.
           NOTES
-          gh release create v0.2.0 build/uk.551.signalbypass14_0.2.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v0.2.0' --notes-file build/release-notes.md --prerelease
+          gh release create v0.3.0 build/uk.551.signalbypass14_0.3.0_iphoneos-arm.deb --target "$GITHUB_SHA" --title 'Signal Bypass iOS 14 v0.3.0' --notes-file build/release-notes.md --prerelease

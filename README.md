@@ -1,6 +1,18 @@
 # Signal Bypass iOS 14
 
-Experimental rootful tweak for **Signal 7.19.1 (208) on iOS 14**. Version 0.2.0 reproduces the supplied expiry tweak's hooks and the reported Info.plist edit. It is not confirmed to fix the black screen, registration, messaging or calls. The reference setup still reports failed calls.
+Experimental rootful tweak for **Signal 7.19.1 (208) on iOS 14**. Version 0.3.0 focuses on startup diagnostics while retaining the build-date edit and expiry hooks. It is not confirmed to fix the black screen, registration, messaging or calls. The reference setup still reports failed calls.
+
+## Version 0.3.0: black-screen diagnosis
+
+Removes the NSProcessInfo iOS 10000 hook introduced in 0.2.0 so OS capability decisions use the real version. This is a potential additional source of trouble, not an established explanation for the original black screen, which was also reported without this tweak.
+
+Adds a bounded, per-launch `Documents/SignalBypass14-startup.log` in Signal's data container. The previous run is retained as `SignalBypass14-startup.previous.log`. Records injection, version gate, hook-provider availability, app delegate entry/return, Signal shared-container lookup success, root-controller creation, visible windows and main-thread responsiveness at 2, 8 and 20 seconds. Does not log messages, phone numbers, tokens, request bodies or keychain values. Does not bypass database migrations, reset data, force a root controller, or dismiss a screen lock.
+
+**Test:** close Signal, install 0.3.0 and respring, open it once and leave it for 25 seconds, then export `SignalBypass14-startup.log` from Signal's data-container Documents folder with Filza. If it exits, also provide the latest Signal `.ips` report. If no log appears, report that explicitly: injection or a failure before the constructor remains possible.
+
+The exact 7.19.1 upstream AppDelegate opens the shared database before initializing its main window. MainAppContext force-unwraps the shared-container URL. The supplied IPA carries Signal's original app-group/keychain entitlements; what the installed copy actually retains cannot be established from the archive alone. These are diagnostic leads, not confirmed causes.
+
+Historical 0.2.0 behavior follows below; the iOS 10000 override is removed in 0.3.0.
 
 ## Changes in 0.2.0
 

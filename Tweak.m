@@ -59,12 +59,6 @@ static BOOL notExpired(id self, SEL sel) { return NO; }
 
 // Reproduce the two hooks verified in the supplied FuckSignalExpiry 0.9.0.
 static NSUInteger expiryStatusCode(id self, SEL sel) { return 0; }
-static NSOperatingSystemVersion (*originalOSVersion)(id, SEL);
-static NSOperatingSystemVersion legacyOSVersion(id self, SEL sel) {
-    NSOperatingSystemVersion value = originalOSVersion(self, sel);
-    value.majorVersion = 10000;
-    return value;
-}
 
 static void install(Class cls, NSString *name, IMP replacement, IMP *original) {
     SEL selector = NSSelectorFromString(name);
@@ -72,6 +66,8 @@ static void install(Class cls, NSString *name, IMP replacement, IMP *original) {
         hookMessage(cls, selector, replacement, original);
     }
 }
+
+#import "StartupDiagnostics.h"
 
 static NSInteger (*originalStatus)(id, SEL);
 static NSInteger responseStatus(id self, SEL sel) {
@@ -90,7 +86,9 @@ static NSInteger responseStatus(id self, SEL sel) {
 }
 
 __attribute__((constructor)) static void start(void) {
+    startTrace();
     @autoreleasepool {
+        trace("reading app metadata");
         NSBundle *main = NSBundle.mainBundle;
         NSString *identifier = main.bundleIdentifier;
         if (![@[@"org.whispersystems.signal", @"org.whispersystems.signal.SignalNSE",
@@ -100,18 +98,22 @@ __attribute__((constructor)) static void start(void) {
         BOOL isIOS14 = uname(&kernel) == 0 && strncmp(kernel.release, "20.", 3) == 0;
         NSString *installedVersion = [main objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
         NSString *installedBuild = [main objectForInfoDictionaryKey:@"CFBundleVersion"];
+        trace("kernel iOS14=%d; installed version=%s build=%s", isIOS14, installedVersion.UTF8String, installedBuild.UTF8String);
         if (!isIOS14 || ![installedVersion isEqualToString:@"7.19.1"] ||
             ![installedBuild isEqualToString:@"208"]) {
+            trace("inactive: unsupported OS/app version");
             NSLog(@"[SignalBypass14] Inactive: requires iOS 14, Signal 7.19.1 (208)");
             return;
         }
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
         hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
         if (!hookMessage) {
+            trace("no MSHookMessageEx provider");
             NSLog(@"[SignalBypass14] No compatible hook provider");
             return;
         }
-        install(NSProcessInfo.class, @"operatingSystemVersion", (IMP)legacyOSVersion, (IMP *)&originalOSVersion);
+        installStartupDiagnostics();
+        trace("NSProcessInfo OS availability retained; installing compatibility hooks");
         Class expiryClass = NSClassFromString(@"SignalServiceKit.AppExpiryImpl");
         if (!expiryClass) expiryClass = objc_getClass("_TtC16SignalServiceKit13AppExpiryImpl");
         install(object_getClass(expiryClass), @"appExpiredStatusCode", (IMP)expiryStatusCode, NULL);
@@ -121,6 +123,7 @@ __attribute__((constructor)) static void start(void) {
         install(NSClassFromString(@"AppExpiry"), @"isExpired", (IMP)notExpired, NULL);
         install(NSClassFromString(@"SignalServiceKit.AppExpiryImpl"), @"isExpired", (IMP)notExpired, NULL);
         install(NSHTTPURLResponse.class, @"statusCode", (IMP)responseStatus, (IMP *)&originalStatus);
-        NSLog(@"[SignalBypass14] v0.2.0 active; app 8.29.0.1866; legacy expiry hooks; build date 2099-01-01");
+        trace("compatibility hooks installed; constructor returning");
+        NSLog(@"[SignalBypass14] v0.3.0 active; app 8.29.0.1866; expiry hooks; startup diagnostics; build date 2099-01-01");
     }
 }
