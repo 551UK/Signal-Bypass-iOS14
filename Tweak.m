@@ -2,92 +2,118 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// Minimal rootful runtime patch for Signal 7.19.1 on iOS 14.
-// v1.3.0 intentionally contains no network interception, HTTP status rewriting,
-// diagnostic UI, runtime log files, OS-version spoof, or URLSession hooks.
+// v1.4.0: minimal registration User-Agent fix.
+//
+// The successful iOS 16 trace showed:
+//   POST https://chat.signal.org/v1/verification/session
+//   User-Agent: Signal-iOS/8.29.0.1866 iOS/16.2
+//   HTTP 200
+//
+// The failing iOS 14 capture showed the same endpoint receiving the genuine
+// 7.19.1/iOS 14 identity and returning HTTP 499.
+//
+// This build therefore avoids the crash-prone pure-Swift expiry hooks from
+// v1.3.0 and changes only the final NSURLSession request immediately before
+// Signal sends registration traffic.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
-typedef void (*HookFunction)(void *, void *, void **);
-
 static HookMessage hookMessage;
-static HookFunction hookFunction;
 
-static BOOL returnFalseObjC(id self, SEL sel) {
-    (void)self;
-    (void)sel;
-    return NO;
+static NSString *const workingUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.2";
+
+static BOOL isSignalHost(NSString *host) {
+    NSString *h = host.lowercaseString ?: @"";
+    return [h isEqualToString:@"signal.org"] ||
+           [h hasSuffix:@".signal.org"] ||
+           [h hasSuffix:@".whispersystems.org"];
 }
 
-static NSUInteger returnZeroObjC(id self, SEL sel) {
-    (void)self;
-    (void)sel;
-    return 0;
+static BOOL isRegistrationRequest(NSURLRequest *request) {
+    if (!request || !isSignalHost(request.URL.host)) return NO;
+    NSString *path = request.URL.path.lowercaseString ?: @"";
+    return [path containsString:@"/v1/verification/session"];
 }
 
-// The exact Swift expiry/update paths exported by SignalServiceKit in
-// Signal 7.19.1 (208). ARM64 permits us to ignore unused incoming arguments.
-static BOOL swiftReturnFalse(void) { return NO; }
-static NSUInteger swiftReturnZero(void) { return 0; }
-static void swiftNoop(void) {}
+static NSURLRequest *rewriteRegistrationIdentity(NSURLRequest *request) {
+    if (!isRegistrationRequest(request)) return request;
 
-static void hookSwift(const char *symbol, void *replacement) {
-    if (!hookFunction) return;
-    void *target = dlsym(RTLD_DEFAULT, symbol);
-    if (target) hookFunction(target, replacement, NULL);
+    NSMutableURLRequest *copy = [request mutableCopy];
+    [copy setValue:workingUserAgent forHTTPHeaderField:@"User-Agent"];
+
+    // Keep every other header, method, URL and body byte-for-byte as Signal
+    // created them. The working iOS 16 trace showed X-Signal-Agent is absent
+    // on the initial verification-session request, so this tweak does not add it.
+    return copy;
 }
 
-static void hookObjC(Class cls, NSString *name, IMP replacement) {
+typedef NSURLSessionUploadTask *(*UploadDataFn)(id, SEL, NSURLRequest *, NSData *);
+typedef NSURLSessionUploadTask *(*UploadDataCompletionFn)(id, SEL, NSURLRequest *, NSData *,
+                                                           void (^)(NSData *, NSURLResponse *, NSError *));
+typedef NSURLSessionDataTask *(*DataRequestFn)(id, SEL, NSURLRequest *);
+typedef NSURLSessionDataTask *(*DataRequestCompletionFn)(id, SEL, NSURLRequest *,
+                                                         void (^)(NSData *, NSURLResponse *, NSError *));
+
+static UploadDataFn originalUploadData;
+static UploadDataCompletionFn originalUploadDataCompletion;
+static DataRequestFn originalDataRequest;
+static DataRequestCompletionFn originalDataRequestCompletion;
+
+static NSURLSessionUploadTask *uploadData(id self, SEL sel, NSURLRequest *request, NSData *data) {
+    return originalUploadData(self, sel, rewriteRegistrationIdentity(request), data);
+}
+
+static NSURLSessionUploadTask *uploadDataCompletion(id self, SEL sel, NSURLRequest *request, NSData *data,
+                                                     void (^completion)(NSData *, NSURLResponse *, NSError *)) {
+    return originalUploadDataCompletion(self, sel, rewriteRegistrationIdentity(request), data, completion);
+}
+
+static NSURLSessionDataTask *dataRequest(id self, SEL sel, NSURLRequest *request) {
+    return originalDataRequest(self, sel, rewriteRegistrationIdentity(request));
+}
+
+static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLRequest *request,
+                                                    void (^completion)(NSData *, NSURLResponse *, NSError *)) {
+    return originalDataRequestCompletion(self, sel, rewriteRegistrationIdentity(request), completion);
+}
+
+static void install(Class cls, SEL selector, IMP replacement, IMP *original) {
     if (!hookMessage || !cls) return;
-    SEL selector = NSSelectorFromString(name);
-    if (class_getInstanceMethod(cls, selector)) {
-        hookMessage(cls, selector, replacement, NULL);
-    }
-}
-
-static void installExpiryHooks(void) {
-    // Local expiry result.
-    hookSwift("$s16SignalServiceKit13AppExpiryImplC9isExpiredSbvg",
-              (void *)&swiftReturnFalse);
-    hookSwift("$s16SignalServiceKit13AppExpiryImplC9isExpiredSbvgTq",
-              (void *)&swiftReturnFalse);
-
-    // HTTP 499 normally persists "expired at current version". Do not let that
-    // state be written for this compatibility build.
-    hookSwift("$s16SignalServiceKit13AppExpiryImplC06setHasD23ExpiredAtCurrentVersion2dbyAA2DB_p_tF",
-              (void *)&swiftNoop);
-    hookSwift("$s16SignalServiceKit13AppExpiryImplC06setHasD23ExpiredAtCurrentVersion2dbyAA2DB_p_tFTq",
-              (void *)&swiftNoop);
-
-    // Status code used by Signal's app-expiry path.
-    hookSwift("$s16SignalServiceKit13AppExpiryImplC20appExpiredStatusCodeSuvgZ",
-              (void *)&swiftReturnZero);
-
-    // Registration can independently classify an unknown challenge as
-    // requiring an app update.
-    hookSwift("$s16SignalServiceKit19RegistrationSessionV37hasUnknownChallengeRequiringAppUpdateSbvg",
-              (void *)&swiftReturnFalse);
-
-    // Objective-C-visible fallbacks, if present in this build.
-    Class expiryClass = NSClassFromString(@"SignalServiceKit.AppExpiryImpl");
-    if (!expiryClass) expiryClass = objc_getClass("_TtC16SignalServiceKit13AppExpiryImpl");
-
-    hookObjC(expiryClass, @"isExpired", (IMP)returnFalseObjC);
-    hookObjC(object_getClass(expiryClass), @"appExpiredStatusCode", (IMP)returnZeroObjC);
-    hookObjC(NSClassFromString(@"AppExpiry"), @"isExpired", (IMP)returnFalseObjC);
+    if (!class_getInstanceMethod(cls, selector)) return;
+    hookMessage(cls, selector, replacement, original);
 }
 
 __attribute__((constructor)) static void start(void) {
     @autoreleasepool {
-        if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"org.whispersystems.signal"]) {
-            return;
-        }
+        if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"org.whispersystems.signal"]) return;
 
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
-        void *scope = provider ?: RTLD_DEFAULT;
-        hookMessage = (HookMessage)dlsym(scope, "MSHookMessageEx");
-        hookFunction = (HookFunction)dlsym(scope, "MSHookFunction");
+        hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
+        if (!hookMessage) return;
 
-        if (!hookFunction && !hookMessage) return;
-        installExpiryHooks();
+        // Signal 7.19.1's OWSURLSession uses NSURLSession uploadTaskWithRequest:
+        // fromData: for registration. Hook the concrete Foundation session class
+        // so the User-Agent is replaced after Signal has finished preparing the
+        // request, not earlier where AppVersion can overwrite it again.
+        Class sessionClass = [NSURLSession.sharedSession class];
+
+        install(sessionClass,
+                @selector(uploadTaskWithRequest:fromData:),
+                (IMP)uploadData,
+                (IMP *)&originalUploadData);
+
+        install(sessionClass,
+                @selector(uploadTaskWithRequest:fromData:completionHandler:),
+                (IMP)uploadDataCompletion,
+                (IMP *)&originalUploadDataCompletion);
+
+        install(sessionClass,
+                @selector(dataTaskWithRequest:),
+                (IMP)dataRequest,
+                (IMP *)&originalDataRequest);
+
+        install(sessionClass,
+                @selector(dataTaskWithRequest:completionHandler:),
+                (IMP)dataRequestCompletion,
+                (IMP *)&originalDataRequestCompletion);
     }
 }
