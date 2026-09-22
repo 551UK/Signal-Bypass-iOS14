@@ -4,7 +4,6 @@
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
 #import <unistd.h>
 #import <string.h>
 
@@ -344,14 +343,14 @@ static NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
                         uint8_t *candidate = segmentStart + offset;
                         if (memcmp(candidate, oldText, oldLength) != 0) continue;
 
-                        const mach_vm_size_t pageSize = (mach_vm_size_t)getpagesize();
-                        const mach_vm_address_t address = (mach_vm_address_t)(uintptr_t)candidate;
-                        const mach_vm_address_t pageStart = address & ~(pageSize - 1);
-                        const mach_vm_address_t pageEnd =
+                        const vm_size_t pageSize = (vm_size_t)getpagesize();
+                        const vm_address_t address = (vm_address_t)(uintptr_t)candidate;
+                        const vm_address_t pageStart = address & ~(pageSize - 1);
+                        const vm_address_t pageEnd =
                             (address + oldLength + pageSize - 1) & ~(pageSize - 1);
-                        const mach_vm_size_t protectLength = pageEnd - pageStart;
+                        const vm_size_t protectLength = pageEnd - pageStart;
 
-                        kern_return_t kr = mach_vm_protect(
+                        kern_return_t kr = vm_protect(
                             mach_task_self(),
                             pageStart,
                             protectLength,
@@ -359,7 +358,7 @@ static NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
                             VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY
                         );
                         if (kr != KERN_SUCCESS) {
-                            kr = mach_vm_protect(
+                            kr = vm_protect(
                                 mach_task_self(),
                                 pageStart,
                                 protectLength,
@@ -371,7 +370,7 @@ static NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
                         if (kr == KERN_SUCCESS) {
                             memcpy(candidate, newText, oldLength);
                             patchCount++;
-                            (void)mach_vm_protect(
+                            (void)vm_protect(
                                 mach_task_self(),
                                 pageStart,
                                 protectLength,
