@@ -1,41 +1,37 @@
 # Signal Bypass iOS 14
 
-## v1.4.5 — known-good clean login baseline
+## Known-good baselines
 
-v1.4.5 is preserved unchanged.
+- **v1.4.5**: first confirmed fresh registration/login baseline.
+- **v1.4.6**: same working login plus unsupported-iOS banner suppression.
 
-## v1.4.6 — known-good login + banner baseline
+Those releases remain unchanged.
 
-v1.4.6 is preserved unchanged and is the baseline for the next compatibility work.
+## v1.5.0 — use Signal 7.19.1's built-in libsignal chat transport
 
-## v1.4.8 — normal chat WebSocket compatibility only
+The post-login failure is now isolated from registration.
 
-v1.4.8 is rebuilt directly from v1.4.6. It intentionally does **not** include the CDSI/contact-discovery experiment from v1.4.7.
+Observed on the iOS 14 client:
 
-FLEX showed Signal 7.19.1 attempting:
+- registration completes
+- `PUT /v2/keys` completes
+- `GET /v1/certificate/delivery` returns 200
+- outgoing messages remain spinning before an actual `/v1/messages` submission
+- incoming messages sent from a working iOS 16 client remain at one tick
+- the legacy Signal 7.19.1 SSK websocket does not establish a usable chat connection
 
-`chat.signal.org/v1/websocket/?login=...&password=...`
+Signal 7.19.1 already includes a second chat transport backed by `LibSignalClient.Net`. The app chooses between the two very early at startup using app-group UserDefaults.
 
-and receiving a bad server response. It also attempted the old anonymous host:
+v1.5.0 forces:
 
-`ud-chat.signal.org/v1/websocket/`
+`UseLibsignalForIdentifiedWebsocket = YES`
 
-which no longer resolves.
+`UseLibsignalForUnidentifiedWebsocket = YES`
 
-The old app also sent its old User-Agent on those WebSocket upgrades.
+and disables the old unidentified shadowing path.
 
-v1.4.8 changes only that transport layer:
+This is done before `ChatConnectionManagerImpl` is created. No websocket URL or auth-header rewriting from the earlier experiments is included.
 
-- `ud-chat.signal.org` is routed to `chat.signal.org`
-- legacy `login` / `password` query parameters are removed
-- identified WebSocket credentials are moved to HTTP Basic `Authorization`
-- anonymous WebSocket remains unauthenticated
-- WebSocket User-Agent becomes `Signal-iOS/8.29.0.1866 iOS/16.2`
+All known-good registration, SPQR, key-upload and banner behavior is preserved.
 
-Registration, SPQR, `/v1/registration`, `/v2/keys`, the existing REST UA rewrite, and the unsupported-iOS banner fix are copied unchanged from v1.4.6.
-
-The trace remains at:
-
-`Signal/Documents/SignalBypass14-Registration.log`
-
-WebSocket log lines contain only host/path/auth-mode information and never the login/password values.
+The local spoof build is advanced to **1872** while keeping the 2027 BuildDetails timestamp so a prior persisted AppExpiry state cannot be reused.
