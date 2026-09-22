@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.4.8-rootful
+          name: SignalBypass14-1.4.9-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,44 +43,37 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          BASELINE PRESERVED:
-          v1.4.5 remains the known-good clean-login release.
-          v1.4.6 remains the known-good fresh-login + unsupported-iOS-banner release.
-          v1.4.8 is rebuilt directly from v1.4.6.
+          v1.4.9 is rebuilt directly from the proven v1.4.6 login/banner code.
+          No v1.4.7 or v1.4.8 WebSocket experiment is included.
 
-          No CDSI/contact-discovery changes from the experimental v1.4.7 branch are included.
+          Why this test:
+          - v1.4.6 obtains /v1/certificate/delivery -> HTTP 200
+          - outgoing messages remain spinning
+          - FLEX shows no subsequent /v1/messages submission
+          - Signal 7.19.1 checks appExpiry.isExpired before entering the message-send pipeline
+          - AppExpiry persists an "immediately expired" state keyed by currentAppVersion after a server 499
+          - the user's comparison device reportedly works after moving BuildDetails into 2027
 
-          The FLEX evidence for normal messaging showed two legacy WebSocket failures:
-          - chat.signal.org/v1/websocket/?login=...&password=... -> bad server response
-          - ud-chat.signal.org/v1/websocket/ -> hostname not found
-          - both websocket upgrade requests still used the old Signal-iOS/7.40.0.1870 iOS/18 User-Agent
+          v1.4.9 changes only local expiry identity/metadata:
+          - local spoof stays 8.29
+          - bundle build advances from 1870 to 1871, giving AppExpiry a new currentAppVersion identity so an older persisted immediate-expiry record is not restored
+          - BuildDetails.Timestamp = 1821655572
+          - BuildDetails.DateTime = Wed Sep 22 23:26:12 UTC 2027
 
-          Current Signal-Server uses the same /v1/websocket/ path, but authenticated connections use HTTP Basic Authorization. Anonymous connections use the same chat service without Authorization.
-
-          v1.4.8 changes only the chat websocket upgrade:
-          - routes retired ud-chat.signal.org to chat.signal.org
-          - removes legacy login/password query parameters
-          - converts them to an Authorization: Basic header for the identified socket
-          - leaves the anonymous socket unauthenticated
-          - applies Signal-iOS/8.29.0.1866 iOS/16.2 to the websocket upgrade
-
-          Unchanged from v1.4.6:
-          - fresh registration/login
-          - spqr=true account creation compatibility
+          Preserved exactly from v1.4.6:
+          - fresh verification/login compatibility
+          - spqr=true registration field
+          - /v1/registration handling
           - /v2/keys handling
-          - REST request handling
+          - chat.signal.org REST User-Agent rewrite
           - unsupported-iOS banner suppression
-          - BuildDate.m / Info.plist metadata
-          - server responses are never forged or rewritten
 
-          Sensitive websocket credentials are not written to the tweak log.
-
-          Persistent trace:
-          Documents/SignalBypass14-Registration.log
+          This build intentionally does not alter the legacy WebSocket path.
+          NOTES
           NOTES
 
-          gh release create v1.4.8 build/uk.551.signalbypass14_1.4.8_iphoneos-arm.deb \
+          gh release create v1.4.9 build/uk.551.signalbypass14_1.4.9_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.4.8' \
+            --title 'Signal Bypass iOS 14 v1.4.9' \
             --notes-file build/release-notes.md \
             --prerelease
