@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.0-rootful
+          name: SignalBypass14-1.5.1-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,36 +43,40 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.5.0 targets the post-login send/receive transport failure.
+          v1.5.1 discards the v1.5.0 forced-libsignal transport experiment.
+          v1.5.0 caused outgoing messages to fail immediately.
 
-          Evidence:
-          - v1.4.6 registration works and /v1/certificate/delivery returns HTTP 200.
-          - outgoing messages remain queued/spinning and never reach /v1/messages.
-          - incoming messages sent by a working iOS 16 client remain at one tick and never appear.
-          - FLEX shows Signal 7.19.1 repeatedly using its legacy SSK websocket transport.
-          - Signal 7.19.1 source already contains an alternate LibSignalClient.Net chat transport.
-          - ChatConnectionManagerImpl selects that transport at startup from these app-group UserDefaults:
-            UseLibsignalForIdentifiedWebsocket
-            UseLibsignalForUnidentifiedWebsocket
+          v1.5.1 is rebuilt from the proven v1.4.6 runtime/login/banner code and
+          explicitly resets the three app-group transport preferences to false:
+          - UseLibsignalForIdentifiedWebsocket
+          - UseLibsignalForUnidentifiedWebsocket
+          - EnableShadowingForUnidentifiedWebsocket
 
-          v1.5.0 forces both transport switches to true before ChatConnectionManagerImpl is constructed and disables unidentified shadowing.
+          This matters because v1.5.0 persisted those values; merely downgrading
+          the dylib would not necessarily restore the original transport.
 
-          It does NOT rewrite websocket URLs or move credentials between query/header forms.
+          Metadata test:
+          - restore the real Signal app identity: 7.19.1 (208)
+          - keep only BuildDetails.Timestamp = 1821655572
+          - keep only BuildDetails.DateTime = Wed Sep 22 23:26:12 UTC 2027
 
-          Preserved:
-          - verification/session UA compatibility
+          This matches the working comparison more closely than the older builds,
+          which also changed CFBundleShortVersionString/CFBundleVersion.
+
+          Preserved from v1.4.6:
+          - fresh verification/login compatibility
           - spqr=true registration compatibility
           - /v1/registration handling
           - /v2/keys handling
-          - chat.signal.org NSURLSession UA compatibility
+          - chat.signal.org NSURLSession User-Agent compatibility
           - unsupported-iOS banner suppression
-          - 2027 BuildDetails expiry test
 
-          Local spoof build advances to 1872 so any AppExpiry record created under 1871 is not restored.
+          No websocket URL/auth rewriting is included.
+          NOTES
           NOTES
 
-          gh release create v1.5.0 build/uk.551.signalbypass14_1.5.0_iphoneos-arm.deb \
+          gh release create v1.5.1 build/uk.551.signalbypass14_1.5.1_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.0' \
+            --title 'Signal Bypass iOS 14 v1.5.1' \
             --notes-file build/release-notes.md \
             --prerelease
