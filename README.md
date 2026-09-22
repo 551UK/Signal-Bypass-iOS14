@@ -1,31 +1,47 @@
 # Signal Bypass iOS 14
 
-## Version 1.4.4: required capability test
+## Version 1.4.5: continue through authenticated Signal service requests
 
-The verification flow is now fully accepted through:
+The v1.4.4 trace proves account creation now succeeds:
 
-`PUT /v1/verification/session/<session>/code -> HTTP 200 -> verified=true`
+`PUT verification code -> HTTP 200 -> verified=true`
 
-The next request is:
+`POST /v1/registration -> HTTP 200`
 
-`POST /v1/registration`
-
-v1.4.3 proved that request reaches Signal with the working Signal 8.29 User-Agent but the server returns:
-
-`HTTP 499 - Missing required device capability`
-
-The old client sends a legacy capabilities map. Current Signal-Server requires **SPQR** for new device registration.
-
-v1.4.4 therefore keeps every working verification change untouched and modifies only the final account-registration JSON:
+The registration request is accepted after adding the currently server-required:
 
 `accountAttributes.capabilities.spqr = true`
 
-The server response is left genuine and is logged. No HTTP 499 rewriting is used.
+Immediately afterward, Signal uploads its prekeys:
 
-### Important
+`PUT /v2/keys`
 
-This build is a compatibility test, not yet the final public solution. The older app's bundled LibSignalClient predates SPQR support, so even if this clears account creation we still need to validate message protocol compatibility before treating the tweak as finished.
+FLEX showed that request still used the old client identity:
 
-Persistent sanitized log:
+`Signal-iOS/7.40.0.1870 iOS/18`
+
+and Signal returned an empty HTTP 499.
+
+### v1.4.5 change
+
+The proven final identity:
+
+`Signal-iOS/8.29.0.1866 iOS/16.2`
+
+is now applied to **all requests to `chat.signal.org`**, rather than only the verification and account-registration endpoints.
+
+This keeps the server-facing identity consistent once the account has been created and prevents the same remote client-deprecation gate from reappearing immediately on `/v2/keys` or another chat-service endpoint.
+
+The tweak still does **not** rewrite HTTP statuses or server responses. `/v2/keys` request data is left exactly as Signal generated it.
+
+### Logging
+
+Persistent logging remains at:
 
 `Signal/Documents/SignalBypass14-Registration.log`
+
+The trace now includes `/v2/keys`. Its large key-upload body is omitted automatically. Access-key fields are also redacted more aggressively.
+
+### Compatibility note
+
+Current Signal-Server required the old client to advertise SPQR before it would create the device. The old app's actual long-term SPQR/message-protocol compatibility still needs testing before this should be treated as a finished public compatibility solution.
