@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.4.6-rootful
+          name: SignalBypass14-1.4.7-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,37 +43,40 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          IMPORTANT BASELINE:
-          v1.4.5 is preserved unchanged as the known-good clean-login build. v1.4.6 is based directly on that working network/login code.
+          BASELINE PRESERVED:
+          v1.4.5 remains the known-good clean-login release.
+          v1.4.6 remains the known-good login + unsupported-iOS-banner release.
+          v1.4.7 is based directly on v1.4.6 and does not alter registration, SPQR, /v1/registration, /v2/keys, HTTP response handling, or the banner hook.
 
-          v1.4.6 changes only the local unsupported-iOS reminder UI.
+          New post-login compatibility work:
 
-          Signal 7.19.1 hard-codes:
-          - minimum iOS major version: 15
-          - enforcement date: 2024-10-01 UTC
+          1. Legacy Signal chat WebSocket modernization
+          Signal 7.19.1 sends authenticated /v1/websocket/ credentials as login/password URL query parameters. Current Signal-Server expects HTTP Basic Authorization on the WebSocket upgrade. v1.4.7 strips those sensitive query values and moves them to the Authorization header.
 
-          That produces the banner:
-          "Signal no longer works on this device. To use Signal again, update your device to a newer version of iOS."
+          2. Retired unidentified host
+          Signal 7.19.1 still uses ud-chat.signal.org for the anonymous socket. That hostname no longer resolves. v1.4.7 routes that anonymous /v1/websocket/ connection to chat.signal.org, matching the modern unified chat service.
 
-          The BuildDetails Timestamp controls a separate app-expiry timer (build date + 90 days), so changing Timestamp/DateTime is not the correct fix for this specific iOS-expiry banner.
+          3. CDSI contact-discovery enclave
+          Signal 7.19.1 embeds CDSI MRENCLAVE:
+          0f6fd79cdfdaa5b2e6337f534d3baf999318b0c462a7ac1f41297a3e4b424a57
 
-          This build hooks only Signal.ExpirationNagView's inherited setHidden: and forces that reminder view to remain hidden.
+          The supplied working Signal 8.29 IPA (LibSignalClient 0.102.0) contains the current CDSI production MRENCLAVE:
+          15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b
 
-          Unchanged from v1.4.5:
-          - verification/session flow
-          - spqr=true registration compatibility field
-          - POST /v1/registration behavior
-          - PUT /v2/keys behavior
-          - Signal 8.29 User-Agent rewrite on chat.signal.org
-          - BuildDate.m / Info.plist timestamp values
-          - HTTP responses are never rewritten
+          v1.4.7 replaces only that 64-byte constant in the loaded SignalServiceKit __TEXT mapping before CDSI is initialized. This keeps the old CDSv2 protocol implementation but points its URL path and SGX attestation verification at the current enclave.
 
-          Persistent trace remains:
+          4. WebSocket User-Agent
+          Signal WebSockets use the same proven server-facing identity:
+          Signal-iOS/8.29.0.1866 iOS/16.2
+
+          Sensitive WebSocket login/password values are never written to the tweak log.
+
+          Persistent trace:
           Documents/SignalBypass14-Registration.log
           NOTES
 
-          gh release create v1.4.6 build/uk.551.signalbypass14_1.4.6_iphoneos-arm.deb \
+          gh release create v1.4.7 build/uk.551.signalbypass14_1.4.7_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.4.6' \
+            --title 'Signal Bypass iOS 14 v1.4.7' \
             --notes-file build/release-notes.md \
             --prerelease
