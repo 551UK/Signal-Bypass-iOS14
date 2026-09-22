@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.4.3-rootful
+          name: SignalBypass14-1.4.4-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,26 +43,26 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Experimental rootful build for Signal on iOS 14.
 
-          v1.4.3 keeps the verification-session behavior that now completes successfully through verified=true.
+          v1.4.4 keeps the complete verification-session flow that reaches verified=true.
 
-          The captured iOS 14 trace proved:
-          - POST /v1/verification/session -> 200
-          - PATCH verification session challenge -> 200
-          - POST verification session /code -> 200
-          - PUT verification session /code -> 200 with verified=true
+          The v1.4.3 trace proved the next request, POST /v1/registration, reaches the server with the spoofed Signal 8.29 User-Agent but is rejected with HTTP 499 and:
+          Missing required device capability
 
-          Signal then moves to POST /v1/registration to create/re-register the account. v1.4.3 extends the same proven final NSURLSession User-Agent rewrite to that endpoint:
-          Signal-iOS/8.29.0.1866 iOS/16.2
+          Current Signal-Server requires the SPQR capability for new device registration. The old client sends a legacy capabilities map without spqr.
 
-          No request bodies, verification codes, HTTP statuses or server responses are modified.
+          This build changes only the JSON body of POST /v1/registration:
+          accountAttributes.capabilities.spqr = true
 
-          Logging now covers both verification-session traffic and POST /v1/registration, persists across Signal launches, and uses stronger redaction for session IDs, phone numbers, push challenges, auth values, tokens and key material.
+          It does not rewrite HTTP statuses or server responses, and it does not alter the verified session ID, auth, account keys, push token, or verification code.
 
-          Log path: Documents/SignalBypass14-Registration.log
+          Persistent sanitized logging remains enabled at:
+          Documents/SignalBypass14-Registration.log
+
+          This is a compatibility probe. A final release still needs validation that the old client can safely operate with the capability it advertises.
           NOTES
 
-          gh release create v1.4.3 build/uk.551.signalbypass14_1.4.3_iphoneos-arm.deb \
+          gh release create v1.4.4 build/uk.551.signalbypass14_1.4.4_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.4.3' \
+            --title 'Signal Bypass iOS 14 v1.4.4' \
             --notes-file build/release-notes.md \
             --prerelease
