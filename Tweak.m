@@ -7,13 +7,12 @@
 #import <unistd.h>
 #import <string.h>
 
-// v1.5.11: v1.5.10 reached current CDSI and received the 24,988-byte
-// attestation, but bundled libsignal 0.71 rejected it because its compile-time
-// CDSI enclave allowlist is keyed to the older c6ff0682... measurement. Keep
-// libsignal 0.71 (iOS 13-compatible and PQ-capable), but patch only that bundled
-// helper's 32-byte CDSI enclave allowlist key to the current 15637fa1...
-// measurement so its existing INTEL-SA-00615/00657 mitigation allowance applies.
-// All non-CDSI crypto remains on Signal 7.19.1's original libsignal 0.52.
+// v1.5.12: v1.5.11 proved that post-load byte patching one visible c6ff0682...
+// constant does not update the optimized CDSI advisory lookup used by libsignal
+// 0.71. Build the CDSI helper from the official v0.71.0 source instead, with
+// ENCLAVE_ID_CDSI changed at compile time to Signal 8.29's live 15637fa1...
+// measurement. This keeps v0.71's own INTEL-SA-00615/00657 allowance intact
+// without disabling SGX attestation. All non-CDSI crypto stays on libsignal 0.52.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
@@ -26,24 +25,6 @@ static NSString *const workingUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.2";
 // Signal 8.29. This patch previously matched one occurrence in SignalServiceKit.
 static const char *oldCdsiMrEnclave = "0f6fd79cdfdaa5b2e6337f534d3baf999318b0c462a7ac1f41297a3e4b424a57";
 static const char *newCdsiMrEnclave = "15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b";
-
-static const uint8_t libsignal71CdsiEnclaveOld[32] = {
-    0xc6,0xff,0x06,0x82,0x21,0x92,0x17,0xf7,
-    0x04,0x56,0x24,0xbe,0x47,0x2a,0x07,0x7c,
-    0x0d,0x4b,0x06,0x19,0x3f,0xe7,0x16,0x32,
-    0xeb,0x0a,0xdb,0x50,0x05,0x1d,0x5d,0xa1
-};
-static const uint8_t libsignalCurrentCdsiEnclave[32] = {
-    0x15,0x63,0x7f,0xa1,0xe5,0x4f,0xe6,0x55,
-    0x17,0x6d,0x3d,0xf1,0xa9,0xf9,0x4b,0x87,
-    0xc0,0x1e,0xd3,0x77,0xac,0xaa,0x57,0x06,
-    0x82,0xdc,0x5d,0x72,0xc9,0x5e,0xf0,0x7b
-};
-
-static NSUInteger patchBytesInLoadedImage(const char *imageNeedle,
-                                          const uint8_t *oldBytes,
-                                          const uint8_t *newBytes,
-                                          size_t length);
 
 static NSUInteger gTraceSequence = 0;
 
@@ -188,7 +169,7 @@ static SignalFfiError *hookedCdsiNew(SignalSgxClientState **out,
     if (!error && out && *out) pqSetAdd(pqHandles, *out);
 
     appendTrace([NSString stringWithFormat:
-        @"[%@] PQ-CDSI new libsignal=0.71+allowlist attestationBytes=%lu mrenclaveBytes=%lu result=%@ errorType=%u",
+        @"[%@] PQ-CDSI new libsignal=0.71+sourcepatch attestationBytes=%lu mrenclaveBytes=%lu result=%@ errorType=%u",
         timestamp(),
         (unsigned long)attestation.length,
         (unsigned long)mrenclave.length,
@@ -344,17 +325,7 @@ static BOOL installCdsiPQBridge(void) {
         return NO;
     }
 
-    NSUInteger allowlistPatchCount = patchBytesInLoadedImage(
-        "SignalCdsiPQBridge.dylib",
-        libsignal71CdsiEnclaveOld,
-        libsignalCurrentCdsiEnclave,
-        sizeof(libsignal71CdsiEnclaveOld)
-    );
-    appendTrace([NSString stringWithFormat:
-        @"PQ-CDSI 0.71 enclave allowlist patch: %@ (%lu occurrence%@).",
-        allowlistPatchCount ? @"ready" : @"not found",
-        (unsigned long)allowlistPatchCount,
-        allowlistPatchCount == 1 ? @"" : @"s"]);
+    appendTrace(@"PQ-CDSI helper: libsignal 0.71 source-compiled with current 15637fa CDSI enclave allowlist key.");
 
 #define SB_LOAD(name, type) ((type)dlsym(bridge, name))
     pqCdsiNew = SB_LOAD("sb71_cds2_client_state_new", SBCdsiNewFn);
@@ -410,7 +381,7 @@ static BOOL installCdsiPQBridge(void) {
         originalSignalErrorFree;
 
     appendTrace([NSString stringWithFormat:
-        @"PQ-CDSI bridge: libsignal=0.71+allowlist helper=%@ hooks=%@.",
+        @"PQ-CDSI bridge: libsignal=0.71+sourcepatch helper=%@ hooks=%@.",
         helperReady ? @"ready" : @"missing",
         hooksReady ? @"ready" : @"partial"]);
     return helperReady && hooksReady;
@@ -896,93 +867,6 @@ static NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
     return patchCount;
 }
 
-
-static NSUInteger patchBytesInLoadedImage(const char *imageNeedle,
-                                          const uint8_t *oldBytes,
-                                          const uint8_t *newBytes,
-                                          size_t length) {
-    if (!imageNeedle || !oldBytes || !newBytes || !length) return 0;
-
-    NSUInteger patchCount = 0;
-    const uint32_t imageCount = _dyld_image_count();
-
-    for (uint32_t imageIndex = 0; imageIndex < imageCount; imageIndex++) {
-        const char *imageName = _dyld_get_image_name(imageIndex);
-        if (!imageName || !strstr(imageName, imageNeedle)) continue;
-
-        const struct mach_header *rawHeader = _dyld_get_image_header(imageIndex);
-        if (!rawHeader || rawHeader->magic != MH_MAGIC_64) continue;
-
-        const struct mach_header_64 *header = (const struct mach_header_64 *)rawHeader;
-        const intptr_t slide = _dyld_get_image_vmaddr_slide(imageIndex);
-        const uint8_t *commandCursor = (const uint8_t *)(header + 1);
-
-        for (uint32_t commandIndex = 0; commandIndex < header->ncmds; commandIndex++) {
-            const struct load_command *loadCommand = (const struct load_command *)commandCursor;
-
-            if (loadCommand->cmd == LC_SEGMENT_64) {
-                const struct segment_command_64 *segment =
-                    (const struct segment_command_64 *)loadCommand;
-
-                // The Rust constant can land in either read-only __TEXT data or
-                // writable __DATA_CONST, so scan every mapped, file-backed segment.
-                if (segment->filesize >= length &&
-                    strcmp(segment->segname, "__LINKEDIT") != 0) {
-                    uint8_t *segmentStart =
-                        (uint8_t *)(uintptr_t)(segment->vmaddr + (uint64_t)slide);
-                    const size_t segmentLength = (size_t)segment->filesize;
-
-                    for (size_t offset = 0; offset + length <= segmentLength; offset++) {
-                        uint8_t *candidate = segmentStart + offset;
-                        if (memcmp(candidate, oldBytes, length) != 0) continue;
-
-                        const vm_size_t pageSize = (vm_size_t)getpagesize();
-                        const vm_address_t address = (vm_address_t)(uintptr_t)candidate;
-                        const vm_address_t pageStart = address & ~(pageSize - 1);
-                        const vm_address_t pageEnd =
-                            (address + length + pageSize - 1) & ~(pageSize - 1);
-                        const vm_size_t protectLength = pageEnd - pageStart;
-
-                        kern_return_t kr = vm_protect(
-                            mach_task_self(),
-                            pageStart,
-                            protectLength,
-                            FALSE,
-                            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY
-                        );
-                        if (kr != KERN_SUCCESS) {
-                            kr = vm_protect(
-                                mach_task_self(),
-                                pageStart,
-                                protectLength,
-                                FALSE,
-                                VM_PROT_READ | VM_PROT_WRITE
-                            );
-                        }
-
-                        if (kr == KERN_SUCCESS) {
-                            memcpy(candidate, newBytes, length);
-                            patchCount++;
-                            (void)vm_protect(
-                                mach_task_self(),
-                                pageStart,
-                                protectLength,
-                                FALSE,
-                                segment->initprot
-                            );
-                            offset += length - 1;
-                        }
-                    }
-                }
-            }
-
-            if (loadCommand->cmdsize == 0) break;
-            commandCursor += loadCommand->cmdsize;
-        }
-    }
-
-    return patchCount;
-}
 
 typedef NSURLSessionUploadTask *(*UploadDataFn)(id, SEL, NSURLRequest *, NSData *);
 typedef NSURLSessionUploadTask *(*UploadDataCompletionFn)(id, SEL, NSURLRequest *, NSData *,
@@ -1853,7 +1737,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.11 only prevents this reminder view from becoming visible; it does
+    // v1.5.12 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -1884,7 +1768,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.11 CDSI attestation allowlist fix\nApp: %@ (%@)\niOS: %@\nV1.5.10 reached current CDSI and received attestation, but libsignal 0.71 rejected INTEL-SA-00615 because its accepted-advisory map was keyed to an older CDSI enclave. This build patches only that bundled helper key to the current 15637fa enclave before attestation.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.12 source-patched CDSI helper\nApp: %@ (%@)\niOS: %@\nV1.5.11 still rejected INTEL-SA-00615 even after post-load byte replacement. This build compiles official libsignal 0.71 from source with ENCLAVE_ID_CDSI=15637fa at compile time, preserving its existing advisory allowance and PQ handshake.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",

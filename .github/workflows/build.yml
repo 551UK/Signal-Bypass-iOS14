@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.11-rootful
+          name: SignalBypass14-1.5.12-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,29 +43,29 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.5.10 reached the current CDSI service and exposed the exact next
-          failure:
-          - /v2/directory/auth returned 200
-          - CDSI websocket upgraded with HTTP 101
-          - a 24,988-byte attestation frame was received
-          - bundled libsignal 0.71 rejected the attestation with:
-            TCB contains unmitigated unaccepted advisory ids: INTEL-SA-00615
+          v1.5.11 confirmed the runtime byte patch was not enough:
+          - the helper reported one c6ff... constant patched
+          - current CDSI still opened with HTTP 101 and delivered 24,988-byte attestation
+          - libsignal 0.71 still rejected INTEL-SA-00615
+          - no /v1/messages/<recipient> request was created
 
-          libsignal 0.71 already treats INTEL-SA-00615 and INTEL-SA-00657 as
-          acceptable for its known CDSI enclave, but that allowlist is keyed to
-          its older c6ff0682... enclave measurement. The live service now uses
-          15637fa1....
+          v1.5.12 removes that fragile post-load patch. Instead the build:
+          - checks out official libsignal v0.71.0 at commit
+            eac4cf58ed9b102778b477a9657d4a348cf28f9c
+          - changes only rust/attest/src/constants.rs ENCLAVE_ID_CDSI from the
+            retired c6ff0682... measurement to current 15637fa1...
+          - compiles libsignal-ffi for aarch64-apple-ios using Signal's own
+            swift/build_ffi.sh (which targets iOS 13)
+          - links that source-patched library only into SignalCdsiPQBridge
+          - preserves v0.71's existing INTEL-SA-00615/00657 allowance and
+            post-quantum Noise implementation
+          - leaves Signal 7.19.1's original libsignal 0.52 in place for all
+            non-CDSI cryptography
 
-          v1.5.11 changes only that compatibility point:
-          - retains libsignal 0.71 because its podspec supports iOS 13/14
-          - patches the bundled helper's raw 32-byte CDSI enclave allowlist key
-            from c6ff0682... to 15637fa1... after dlopen
-          - does not disable SGX attestation or skip verification
-          - retains current post-quantum Noise, CDSI Basic auth, and current path
-          - keeps Signal 7.19.1 libsignal 0.52 for all non-CDSI crypto
+          SGX attestation is still fully performed; no attestation check is disabled.
 
           Expected success markers:
-          - PQ-CDSI 0.71 enclave allowlist patch: ready
+          - PQ-CDSI helper: libsignal 0.71 source-compiled...
           - PQ-CDSI new ... result=ok
           - PQ-CDSI initialRequest ... result=ok
           - CDSI WS-FRAME OUT
@@ -73,8 +73,8 @@ jobs:
           - establishedSend/Recv followed by /v1/messages/<recipient>
           NOTES
 
-          gh release create v1.5.11 build/uk.551.signalbypass14_1.5.11_iphoneos-arm.deb \
+          gh release create v1.5.12 build/uk.551.signalbypass14_1.5.12_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.11' \
+            --title 'Signal Bypass iOS 14 v1.5.12' \
             --notes-file build/release-notes.md \
             --prerelease

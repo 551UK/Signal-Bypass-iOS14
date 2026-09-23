@@ -9,26 +9,54 @@ SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
 mkdir -p build package/DEBIAN package/Library/MobileSubstrate/DynamicLibraries
 mkdir -p package/usr/libexec
 
-# Signal 7.19.1 bundles libsignal 0.52, whose CDSI Noise handshake is pre-PQ.
-# Keep v0.71.0 because it is PQ-capable and officially supports iOS 13/14.
-# v1.5.11 patches only its stale CDSI enclave advisory-map key at runtime.
+# Signal 7.19.1 bundles libsignal 0.52, whose CDSI handshake cannot
+# speak the live post-quantum service. v0.71.0 is PQ-capable and still targets
+# iOS 13, but its CDSI advisory map is compiled against the retired c6ff...
+# enclave. Build that exact official source with only ENCLAVE_ID_CDSI updated
+# to the current Signal 8.29 production enclave.
 LIBSIGNAL71_VERSION="0.71.0"
-LIBSIGNAL71_SHA256="0bcf7d7255f153920ffa6cf03fe84a831a995347c767cd9f72463411296a0616"
-LIBSIGNAL71_ARCHIVE="build/libsignal-client-ios-build-v${LIBSIGNAL71_VERSION}.tar.gz"
-LIBSIGNAL71_DIR="build/libsignal71"
+LIBSIGNAL71_COMMIT="eac4cf58ed9b102778b477a9657d4a348cf28f9c"
+LIBSIGNAL71_SRC="build/libsignal71-src"
+LIBSIGNAL71_OLD_CDSI="c6ff0682219217f7045624be472a077c0d4b06193fe71632eb0adb50051d5da1"
+LIBSIGNAL71_NEW_CDSI="15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b"
 
-curl -fL --retry 3 \
-  "https://build-artifacts.signal.org/libraries/libsignal-client-ios-build-v${LIBSIGNAL71_VERSION}.tar.gz" \
-  -o "${LIBSIGNAL71_ARCHIVE}"
-printf '%s  %s\n' "${LIBSIGNAL71_SHA256}" "${LIBSIGNAL71_ARCHIVE}" | shasum -a 256 -c -
+rm -rf "${LIBSIGNAL71_SRC}"
+git clone --depth 1 --branch "v${LIBSIGNAL71_VERSION}" \
+  https://github.com/signalapp/libsignal.git "${LIBSIGNAL71_SRC}"
+[[ "$(git -C "${LIBSIGNAL71_SRC}" rev-parse HEAD)" == "${LIBSIGNAL71_COMMIT}" ]] || {
+  echo "Unexpected libsignal v${LIBSIGNAL71_VERSION} commit"
+  git -C "${LIBSIGNAL71_SRC}" rev-parse HEAD
+  exit 1
+}
 
-rm -rf "${LIBSIGNAL71_DIR}"
-mkdir -p "${LIBSIGNAL71_DIR}"
-tar -m -x -f "${LIBSIGNAL71_ARCHIVE}" -C "${LIBSIGNAL71_DIR}"
-LIBSIGNAL71_STATIC="$(find "${LIBSIGNAL71_DIR}" -type f -path '*/aarch64-apple-ios/release/libsignal_ffi.a' -print -quit)"
-[[ -n "${LIBSIGNAL71_STATIC}" && -f "${LIBSIGNAL71_STATIC}" ]] || {
-  echo "Could not find libsignal 0.71 iOS static library"
-  find "${LIBSIGNAL71_DIR}" -maxdepth 6 -type f | sort
+python3 - "${LIBSIGNAL71_SRC}/rust/attest/src/constants.rs" \
+  "${LIBSIGNAL71_OLD_CDSI}" "${LIBSIGNAL71_NEW_CDSI}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+old = sys.argv[2]
+new = sys.argv[3]
+text = path.read_text()
+count = text.count(old)
+if count != 1:
+    raise SystemExit(f"expected exactly one old CDSI enclave in {path}, found {count}")
+path.write_text(text.replace(old, new))
+check = path.read_text()
+if old in check or check.count(new) != 1:
+    raise SystemExit("CDSI source patch verification failed")
+print("Patched libsignal 0.71 ENCLAVE_ID_CDSI at source level:", new)
+PY
+
+(
+  cd "${LIBSIGNAL71_SRC}"
+  rustup target add aarch64-apple-ios
+  CARGO_BUILD_TARGET=aarch64-apple-ios ./swift/build_ffi.sh --release
+)
+
+LIBSIGNAL71_STATIC="${LIBSIGNAL71_SRC}/target/aarch64-apple-ios/release/libsignal_ffi.a"
+[[ -f "${LIBSIGNAL71_STATIC}" ]] || {
+  echo "Could not find source-built libsignal 0.71 iOS static library"
   exit 1
 }
 
@@ -85,7 +113,7 @@ BRIDGE_MODE="$(stat -f '%Lp' package/Library/MobileSubstrate/DynamicLibraries/Si
   exit 1
 }
 
-dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_1.5.11_iphoneos-arm.deb
+dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_1.5.12_iphoneos-arm.deb
 
-dpkg-deb --info build/uk.551.signalbypass14_1.5.11_iphoneos-arm.deb
-dpkg-deb --contents build/uk.551.signalbypass14_1.5.11_iphoneos-arm.deb
+dpkg-deb --info build/uk.551.signalbypass14_1.5.12_iphoneos-arm.deb
+dpkg-deb --contents build/uk.551.signalbypass14_1.5.12_iphoneos-arm.deb
