@@ -7,12 +7,12 @@
 #import <unistd.h>
 #import <string.h>
 
-// v1.5.9: v1.5.8 successfully reached native CDSI, but the websocket closed
-// locally with code 1007 before Signal 7.19.1 sent its Noise handshake frame.
-// Test the legacy CDSI enclave that matches libsignal 0.52's pre-PQ Noise NK
-// implementation instead of rewriting it to the current post-quantum enclave.
-// Also trace CDSI inbound frame sizes so we can distinguish attestation receipt
-// from client-side attestation/handshake rejection without logging contents.
+// v1.5.10: v1.5.9 proved the old 0f6fd79 CDSI enclave endpoint is retired
+// (HTTP 404). Restore the current CDSI enclave and route only CDSI's SGX client
+// operations through a bundled libsignal 0.71 FFI bridge. 0.71 is the first
+// libsignal release whose CDSI client uses post-quantum Noise NKhfs+Kyber1024,
+// while its podspec still supports iOS 13, making it suitable for iOS 14.
+// All non-CDSI libsignal calls remain on Signal 7.19.1's original 0.52 runtime.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
@@ -24,7 +24,7 @@ static NSString *const workingUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.2";
 // Signal 7.19.1's stale CDSI enclave measurement and the value bundled by
 // Signal 8.29. This patch previously matched one occurrence in SignalServiceKit.
 static const char *oldCdsiMrEnclave = "0f6fd79cdfdaa5b2e6337f534d3baf999318b0c462a7ac1f41297a3e4b424a57";
-static const char *newCdsiMrEnclave __attribute__((unused)) = "15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b";
+static const char *newCdsiMrEnclave = "15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b";
 
 static NSUInteger gTraceSequence = 0;
 
@@ -67,6 +67,322 @@ static NSString *timestamp(void) {
         f.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
     });
     return [f stringFromDate:[NSDate date]];
+}
+
+
+#pragma mark - CDSI post-quantum libsignal 0.71 bridge
+
+typedef struct SignalFfiError SignalFfiError;
+typedef struct SignalSgxClientState SignalSgxClientState;
+typedef struct {
+    const unsigned char *base;
+    size_t length;
+} SBSignalBorrowedBuffer;
+typedef struct {
+    unsigned char *base;
+    size_t length;
+} SBSignalOwnedBuffer;
+
+typedef SignalFfiError *(*SBCdsiNewFn)(SignalSgxClientState **, SBSignalBorrowedBuffer, SBSignalBorrowedBuffer, uint64_t);
+typedef SignalFfiError *(*SBSgxDestroyFn)(SignalSgxClientState *);
+typedef SignalFfiError *(*SBSgxInitialFn)(SBSignalOwnedBuffer *, const SignalSgxClientState *);
+typedef SignalFfiError *(*SBSgxCompleteFn)(SignalSgxClientState *, SBSignalBorrowedBuffer);
+typedef SignalFfiError *(*SBSgxSendFn)(SBSignalOwnedBuffer *, SignalSgxClientState *, SBSignalBorrowedBuffer);
+typedef void (*SBFreeBufferFn)(const unsigned char *, size_t);
+typedef void (*SBFreeStringFn)(const char *);
+typedef uint32_t (*SBErrorTypeFn)(const SignalFfiError *);
+typedef SignalFfiError *(*SBErrorMessageFn)(const SignalFfiError *, const char **);
+typedef void (*SBErrorFreeFn)(SignalFfiError *);
+
+static SBCdsiNewFn pqCdsiNew;
+static SBSgxDestroyFn pqSgxDestroy;
+static SBSgxInitialFn pqSgxInitial;
+static SBSgxCompleteFn pqSgxComplete;
+static SBSgxSendFn pqSgxSend;
+static SBSgxSendFn pqSgxRecv;
+static SBFreeBufferFn pqFreeBuffer;
+static SBFreeStringFn pqFreeString;
+static SBErrorTypeFn pqErrorType;
+static SBErrorMessageFn pqErrorMessage;
+static SBErrorFreeFn pqErrorFree;
+
+static SBCdsiNewFn originalCdsiNew;
+static SBSgxDestroyFn originalSgxDestroy;
+static SBSgxInitialFn originalSgxInitial;
+static SBSgxCompleteFn originalSgxComplete;
+static SBSgxSendFn originalSgxSend;
+static SBSgxSendFn originalSgxRecv;
+static SBFreeBufferFn originalSignalFreeBuffer;
+static SBFreeStringFn originalSignalFreeString;
+static SBErrorTypeFn originalSignalErrorType;
+static SBErrorMessageFn originalSignalErrorMessage;
+static SBErrorFreeFn originalSignalErrorFree;
+
+static NSMutableSet<NSValue *> *pqHandles;
+static NSMutableSet<NSValue *> *pqBuffers;
+static NSMutableSet<NSValue *> *pqStrings;
+static NSMutableSet<NSValue *> *pqErrors;
+
+static NSValue *pqPointerValue(const void *pointer) {
+    return pointer ? [NSValue valueWithPointer:pointer] : nil;
+}
+
+static BOOL pqSetContains(NSMutableSet<NSValue *> *set, const void *pointer) {
+    if (!set || !pointer) return NO;
+    @synchronized (set) {
+        return [set containsObject:pqPointerValue(pointer)];
+    }
+}
+
+static void pqSetAdd(NSMutableSet<NSValue *> *set, const void *pointer) {
+    if (!set || !pointer) return;
+    @synchronized (set) {
+        [set addObject:pqPointerValue(pointer)];
+    }
+}
+
+static void pqSetRemove(NSMutableSet<NSValue *> *set, const void *pointer) {
+    if (!set || !pointer) return;
+    @synchronized (set) {
+        [set removeObject:pqPointerValue(pointer)];
+    }
+}
+
+static uint32_t pqTrackError(SignalFfiError *error) {
+    if (!error) return 0;
+    pqSetAdd(pqErrors, error);
+    return pqErrorType ? pqErrorType(error) : 0;
+}
+
+static SignalFfiError *hookedCdsiNew(SignalSgxClientState **out,
+                                     SBSignalBorrowedBuffer mrenclave,
+                                     SBSignalBorrowedBuffer attestation,
+                                     uint64_t timestampMs) {
+    if (!pqCdsiNew) {
+        return originalCdsiNew
+            ? originalCdsiNew(out, mrenclave, attestation, timestampMs)
+            : NULL;
+    }
+
+    SignalFfiError *error = pqCdsiNew(out, mrenclave, attestation, timestampMs);
+    uint32_t type = pqTrackError(error);
+    if (!error && out && *out) pqSetAdd(pqHandles, *out);
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] PQ-CDSI new libsignal=0.71 attestationBytes=%lu mrenclaveBytes=%lu result=%@ errorType=%u",
+        timestamp(),
+        (unsigned long)attestation.length,
+        (unsigned long)mrenclave.length,
+        error ? @"error" : @"ok",
+        type]);
+    return error;
+}
+
+static SignalFfiError *hookedSgxDestroy(SignalSgxClientState *handle) {
+    if (pqSetContains(pqHandles, handle) && pqSgxDestroy) {
+        pqSetRemove(pqHandles, handle);
+        SignalFfiError *error = pqSgxDestroy(handle);
+        pqTrackError(error);
+        return error;
+    }
+    return originalSgxDestroy ? originalSgxDestroy(handle) : NULL;
+}
+
+static SignalFfiError *hookedSgxInitial(SBSignalOwnedBuffer *out,
+                                        const SignalSgxClientState *handle) {
+    if (pqSetContains(pqHandles, handle) && pqSgxInitial) {
+        SignalFfiError *error = pqSgxInitial(out, handle);
+        uint32_t type = pqTrackError(error);
+        if (!error && out && out->base) pqSetAdd(pqBuffers, out->base);
+        appendTrace([NSString stringWithFormat:
+            @"[%@] PQ-CDSI initialRequest result=%@ bytes=%lu errorType=%u",
+            timestamp(),
+            error ? @"error" : @"ok",
+            (unsigned long)(out ? out->length : 0),
+            type]);
+        return error;
+    }
+    return originalSgxInitial ? originalSgxInitial(out, handle) : NULL;
+}
+
+static SignalFfiError *hookedSgxComplete(SignalSgxClientState *handle,
+                                         SBSignalBorrowedBuffer response) {
+    if (pqSetContains(pqHandles, handle) && pqSgxComplete) {
+        SignalFfiError *error = pqSgxComplete(handle, response);
+        uint32_t type = pqTrackError(error);
+        appendTrace([NSString stringWithFormat:
+            @"[%@] PQ-CDSI completeHandshake responseBytes=%lu result=%@ errorType=%u",
+            timestamp(),
+            (unsigned long)response.length,
+            error ? @"error" : @"ok",
+            type]);
+        return error;
+    }
+    return originalSgxComplete ? originalSgxComplete(handle, response) : NULL;
+}
+
+static SignalFfiError *hookedSgxSend(SBSignalOwnedBuffer *out,
+                                     SignalSgxClientState *handle,
+                                     SBSignalBorrowedBuffer plaintext) {
+    if (pqSetContains(pqHandles, handle) && pqSgxSend) {
+        SignalFfiError *error = pqSgxSend(out, handle, plaintext);
+        uint32_t type = pqTrackError(error);
+        if (!error && out && out->base) pqSetAdd(pqBuffers, out->base);
+        appendTrace([NSString stringWithFormat:
+            @"[%@] PQ-CDSI establishedSend plainBytes=%lu cipherBytes=%lu result=%@ errorType=%u",
+            timestamp(),
+            (unsigned long)plaintext.length,
+            (unsigned long)(out ? out->length : 0),
+            error ? @"error" : @"ok",
+            type]);
+        return error;
+    }
+    return originalSgxSend ? originalSgxSend(out, handle, plaintext) : NULL;
+}
+
+static SignalFfiError *hookedSgxRecv(SBSignalOwnedBuffer *out,
+                                     SignalSgxClientState *handle,
+                                     SBSignalBorrowedBuffer ciphertext) {
+    if (pqSetContains(pqHandles, handle) && pqSgxRecv) {
+        SignalFfiError *error = pqSgxRecv(out, handle, ciphertext);
+        uint32_t type = pqTrackError(error);
+        if (!error && out && out->base) pqSetAdd(pqBuffers, out->base);
+        appendTrace([NSString stringWithFormat:
+            @"[%@] PQ-CDSI establishedRecv cipherBytes=%lu plainBytes=%lu result=%@ errorType=%u",
+            timestamp(),
+            (unsigned long)ciphertext.length,
+            (unsigned long)(out ? out->length : 0),
+            error ? @"error" : @"ok",
+            type]);
+        return error;
+    }
+    return originalSgxRecv ? originalSgxRecv(out, handle, ciphertext) : NULL;
+}
+
+static void hookedSignalFreeBuffer(const unsigned char *buffer, size_t length) {
+    if (pqSetContains(pqBuffers, buffer) && pqFreeBuffer) {
+        pqSetRemove(pqBuffers, buffer);
+        pqFreeBuffer(buffer, length);
+        return;
+    }
+    if (originalSignalFreeBuffer) originalSignalFreeBuffer(buffer, length);
+}
+
+static void hookedSignalFreeString(const char *string) {
+    if (pqSetContains(pqStrings, string) && pqFreeString) {
+        pqSetRemove(pqStrings, string);
+        pqFreeString(string);
+        return;
+    }
+    if (originalSignalFreeString) originalSignalFreeString(string);
+}
+
+static uint32_t hookedSignalErrorType(const SignalFfiError *error) {
+    if (pqSetContains(pqErrors, error) && pqErrorType) return pqErrorType(error);
+    return originalSignalErrorType ? originalSignalErrorType(error) : 0;
+}
+
+static SignalFfiError *hookedSignalErrorMessage(const SignalFfiError *error,
+                                                const char **out) {
+    if (pqSetContains(pqErrors, error) && pqErrorMessage) {
+        SignalFfiError *secondary = pqErrorMessage(error, out);
+        pqTrackError(secondary);
+        if (!secondary && out && *out) {
+            pqSetAdd(pqStrings, *out);
+            appendTrace([NSString stringWithFormat:
+                @"[%@] PQ-CDSI error: %s",
+                timestamp(),
+                *out]);
+        }
+        return secondary;
+    }
+    return originalSignalErrorMessage ? originalSignalErrorMessage(error, out) : NULL;
+}
+
+static void hookedSignalErrorFree(SignalFfiError *error) {
+    if (pqSetContains(pqErrors, error) && pqErrorFree) {
+        pqSetRemove(pqErrors, error);
+        pqErrorFree(error);
+        return;
+    }
+    if (originalSignalErrorFree) originalSignalErrorFree(error);
+}
+
+static BOOL installCdsiPQBridge(void) {
+    if (!hookFunction) {
+        appendTrace(@"PQ-CDSI bridge: MSHookFunction unavailable.");
+        return NO;
+    }
+
+    void *bridge = dlopen(
+        "/Library/MobileSubstrate/DynamicLibraries/SignalCdsiPQBridge.dylib",
+        RTLD_NOW | RTLD_LOCAL);
+    if (!bridge) {
+        const char *error = dlerror();
+        appendTrace([NSString stringWithFormat:
+            @"PQ-CDSI bridge load failed: %s",
+            error ?: "unknown"]);
+        return NO;
+    }
+
+#define SB_LOAD(name, type) ((type)dlsym(bridge, name))
+    pqCdsiNew = SB_LOAD("sb71_cds2_client_state_new", SBCdsiNewFn);
+    pqSgxDestroy = SB_LOAD("sb71_sgx_client_state_destroy", SBSgxDestroyFn);
+    pqSgxInitial = SB_LOAD("sb71_sgx_client_state_initial_request", SBSgxInitialFn);
+    pqSgxComplete = SB_LOAD("sb71_sgx_client_state_complete_handshake", SBSgxCompleteFn);
+    pqSgxSend = SB_LOAD("sb71_sgx_client_state_established_send", SBSgxSendFn);
+    pqSgxRecv = SB_LOAD("sb71_sgx_client_state_established_recv", SBSgxSendFn);
+    pqFreeBuffer = SB_LOAD("sb71_free_buffer", SBFreeBufferFn);
+    pqFreeString = SB_LOAD("sb71_free_string", SBFreeStringFn);
+    pqErrorType = SB_LOAD("sb71_error_get_type", SBErrorTypeFn);
+    pqErrorMessage = SB_LOAD("sb71_error_get_message", SBErrorMessageFn);
+    pqErrorFree = SB_LOAD("sb71_error_free", SBErrorFreeFn);
+#undef SB_LOAD
+
+    BOOL helperReady =
+        pqCdsiNew && pqSgxDestroy && pqSgxInitial && pqSgxComplete &&
+        pqSgxSend && pqSgxRecv && pqFreeBuffer && pqFreeString &&
+        pqErrorType && pqErrorMessage && pqErrorFree;
+    if (!helperReady) {
+        appendTrace(@"PQ-CDSI bridge: helper exports incomplete.");
+        return NO;
+    }
+
+    pqHandles = [NSMutableSet set];
+    pqBuffers = [NSMutableSet set];
+    pqStrings = [NSMutableSet set];
+    pqErrors = [NSMutableSet set];
+
+#define SB_HOOK(symbolName, replacement, original) do { \
+    void *symbol = dlsym(RTLD_DEFAULT, symbolName); \
+    if (symbol) hookFunction(symbol, (void *)(replacement), (void **)&(original)); \
+} while (0)
+
+    SB_HOOK("signal_cds2_client_state_new", hookedCdsiNew, originalCdsiNew);
+    SB_HOOK("signal_sgx_client_state_destroy", hookedSgxDestroy, originalSgxDestroy);
+    SB_HOOK("signal_sgx_client_state_initial_request", hookedSgxInitial, originalSgxInitial);
+    SB_HOOK("signal_sgx_client_state_complete_handshake", hookedSgxComplete, originalSgxComplete);
+    SB_HOOK("signal_sgx_client_state_established_send", hookedSgxSend, originalSgxSend);
+    SB_HOOK("signal_sgx_client_state_established_recv", hookedSgxRecv, originalSgxRecv);
+    SB_HOOK("signal_free_buffer", hookedSignalFreeBuffer, originalSignalFreeBuffer);
+    SB_HOOK("signal_free_string", hookedSignalFreeString, originalSignalFreeString);
+    SB_HOOK("signal_error_get_type", hookedSignalErrorType, originalSignalErrorType);
+    SB_HOOK("signal_error_get_message", hookedSignalErrorMessage, originalSignalErrorMessage);
+    SB_HOOK("signal_error_free", hookedSignalErrorFree, originalSignalErrorFree);
+#undef SB_HOOK
+
+    BOOL hooksReady =
+        originalCdsiNew && originalSgxDestroy && originalSgxInitial &&
+        originalSgxComplete && originalSgxSend && originalSgxRecv &&
+        originalSignalFreeBuffer && originalSignalFreeString &&
+        originalSignalErrorType && originalSignalErrorMessage &&
+        originalSignalErrorFree;
+
+    appendTrace([NSString stringWithFormat:
+        @"PQ-CDSI bridge: libsignal=0.71 helper=%@ hooks=%@.",
+        helperReady ? @"ready" : @"missing",
+        hooksReady ? @"ready" : @"partial"]);
+    return helperReady && hooksReady;
 }
 
 static BOOL isSignalHost(NSString *host) {
@@ -461,7 +777,7 @@ static void logResponse(NSUInteger sequence,
 }
 
 
-static __attribute__((unused)) NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
+static NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
                                              const char *oldText,
                                              const char *newText) {
     if (!imageNeedle || !oldText || !newText) return 0;
@@ -705,16 +1021,20 @@ static NSMutableURLRequest *rewriteLegacyChatWebSocket(id sessionObject,
         components.host = @"chat.signal.org";
     }
 
-    // v1.5.9 deliberately preserves Signal 7.19.1's original CDSI enclave.
-    // That endpoint matches the client's libsignal 0.52 pre-PQ Noise protocol.
-    // We still preserve session headers, Basic auth, and the modern UA below.
     if (isCdsi) {
         NSString *path = components.path ?: @"";
-        NSString *legacyEnclave = [NSString stringWithUTF8String:oldCdsiMrEnclave];
+        NSString *oldEnclave = [NSString stringWithUTF8String:oldCdsiMrEnclave];
+        NSString *newEnclave = [NSString stringWithUTF8String:newCdsiMrEnclave];
+        BOOL rewrote = NO;
+        if ([path containsString:oldEnclave]) {
+            components.path = [path stringByReplacingOccurrencesOfString:oldEnclave
+                                                              withString:newEnclave];
+            rewrote = YES;
+        }
         appendTrace([NSString stringWithFormat:
-            @"[%@] CDSI-ENCLAVE mode=legacy pathMatches=%@",
+            @"[%@] CDSI-ENCLAVE mode=current-pq rewritten=%@",
             timestamp(),
-            [path containsString:legacyEnclave] ? @"yes" : @"no"]);
+            rewrote ? @"yes" : @"no"]);
     }
 
     NSString *login = nil;
@@ -1414,7 +1734,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.9 only prevents this reminder view from becoming visible; it does
+    // v1.5.10 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -1445,14 +1765,22 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.9 legacy CDSI enclave test\nApp: %@ (%@)\niOS: %@\nV1.5.8 reached native CDSI but closed locally with code 1007 before a client handshake frame was sent. This build retains Signal 7.19.1's original 0f6fd79 CDSI enclave to test its matching pre-PQ Noise NK protocol, while preserving the successful remote-config and chat fixes.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.10 post-quantum CDSI bridge\nApp: %@ (%@)\niOS: %@\nV1.5.9 proved the legacy 0f6fd79 CDSI endpoint is retired (HTTP 404). This build restores the current CDSI enclave and routes only CDSI SGX operations through libsignal 0.71's post-quantum Noise implementation; all other Signal crypto remains on 0.52.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
             NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?"
         ]);
 
-        appendTrace(@"CDSI enclave mode: legacy 0f6fd79 retained; current-enclave rewrite disabled.");
+        NSUInteger cdsiPatchCount = patchCStringInLoadedImage(
+            "SignalServiceKit.framework/SignalServiceKit",
+            oldCdsiMrEnclave,
+            newCdsiMrEnclave
+        );
+        appendTrace([NSString stringWithFormat:
+            @"CDSI enclave mode: current 15637fa restored (%lu old constant occurrence%@ patched).",
+            (unsigned long)cdsiPatchCount,
+            cdsiPatchCount == 1 ? @"" : @"s"]);
 
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
         hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
@@ -1462,6 +1790,7 @@ __attribute__((constructor)) static void start(void) {
             return;
         }
 
+        installCdsiPQBridge();
         installCdsiRemoteConfigForce(provider);
         installHTTPResponseRemoteConfigAdapter();
 
