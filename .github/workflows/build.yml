@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.7-rootful
+          name: SignalBypass14-1.5.8-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,29 +43,30 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.5.6 proved the modern /v2/config endpoint is reachable and returns
-          HTTP 200, but the old client still repeatedly requests config plus
-          /v2/directory/auth and never opens a CDSI websocket. The expected
-          v2->legacy translation marker was also absent.
+          v1.5.7 showed:
+          - the exported Swift RemoteConfig.cdsiLookupWithLibsignal symbol was hooked
+          - that thunk was never called by the optimized Signal 7.19.1 send path
+          - /v2/config and /v2/directory/auth still repeat
+          - no CDSI websocket and no /v1/messages/<recipient> request appears
 
-          v1.5.7 targets that exact branch selection:
-          - hooks the Swift RemoteConfig.cdsiLookupWithLibsignal getter and forces false
-          - also tries the Objective-C class getter as a compatibility fallback
-          - remote-config response translation now triggers from the final /v2/config path
-            even when NSURLSession internally re-enters the request hook
-          - retains the Signal 8.29 CDSI MrEnclave patch
-          - retains chat websocket Basic-auth/host/UA compatibility
-          - retains content-safe HTTP and websocket diagnostics
+          v1.5.8 moves the compatibility shim to the concrete response object
+          Signal 7.19.1 actually parses:
+          - hooks HTTPResponseImpl.responseBodyJson and bodyJson
+          - for only /v1/config or /v2/config, returns the legacy array schema
+          - sets ios.cdsiLookup.libsignal=false
+          - keeps legacy chat transport/libsignal/shadowing flags false
+          - leaves every non-config response untouched
+          - retains the 8.29 CDSI MrEnclave patch and chat websocket fixes
 
-          Expected new log markers:
-          - CDSI remote-config force: ... swift=yes (or objc=yes)
-          - CDSI-FLAG ... forced false
+          Expected log markers:
+          - Remote-config HTTPResponse hooks: ... bodyJson=yes responseBodyJson=yes
+          - REMOTE-CONFIG HTTPResponseImpl translated to Signal-7.19 schema
           - CDSI-WEBSOCKET host=cdsi.signal.org ...
-          - then recipient key/session work followed by /v1/messages/<recipient>
+          - then recipient key/session work and /v1/messages/<recipient>
           NOTES
 
-          gh release create v1.5.7 build/uk.551.signalbypass14_1.5.7_iphoneos-arm.deb \
+          gh release create v1.5.8 build/uk.551.signalbypass14_1.5.8_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.7' \
+            --title 'Signal Bypass iOS 14 v1.5.8' \
             --notes-file build/release-notes.md \
             --prerelease

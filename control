@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.5.7
+Version: 1.5.8
 Architecture: iphoneos-arm
-Description: Directly forces native CDSI at runtime, hardens remote-config translation, and keeps the working legacy chat websocket compatibility.
+Description: Translates modern remote config at Signal 7.19.1's HTTPResponse consumer so native CDSI can be selected; keeps chat websocket compatibility.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks

@@ -7,12 +7,12 @@
 #import <unistd.h>
 #import <string.h>
 
-// v1.5.7: v1.5.6 proves /v2/config itself is reachable (HTTP 200), but the
-// old app still retries config/directory auth and never creates a CDSI websocket.
-// The v2->legacy response adapter was not reached on-device. Force the exact
-// RemoteConfig.cdsiLookupWithLibsignal getter to false at runtime (Swift symbol
-// hook plus Objective-C fallback), and make v2 config response translation key
-// only off the final request path so nested NSURLSession rewriting cannot miss it.
+// v1.5.8: v1.5.7 confirmed the Swift RemoteConfig getter symbol can be hooked,
+// but the send path never calls that exported thunk and the app still retries
+// /v2/config + /v2/directory/auth. Translate remote config where Signal 7.19.1
+// actually consumes it: HTTPResponseImpl.responseBodyJson/bodyJson. This lets
+// the old RemoteConfigManager receive its expected array schema and cache
+// ios.cdsiLookup.libsignal=false before ContactDiscoveryV2Operation is created.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
@@ -1252,6 +1252,89 @@ static void tracedOWSTaskDidComplete(id self,
 
 static void install(Class cls, SEL selector, IMP replacement, IMP *original);
 
+
+typedef id (*HTTPResponseJsonFn)(id, SEL);
+static HTTPResponseJsonFn originalHTTPResponseBodyJson;
+static HTTPResponseJsonFn originalHTTPResponseResponseBodyJson;
+static BOOL gLoggedLegacyConfigJson = NO;
+
+static BOOL responseIsRemoteConfig(id self) {
+    NSURL *requestUrl = nil;
+    @try {
+        id value = [self valueForKey:@"requestUrl"];
+        if ([value isKindOfClass:NSURL.class]) requestUrl = value;
+    } @catch (__unused NSException *e) {}
+
+    NSString *host = requestUrl.host.lowercaseString ?: @"";
+    NSString *path = requestUrl.path.lowercaseString ?: @"";
+    BOOL chatHost = [host isEqualToString:@"chat.signal.org"];
+    BOOL configPath =
+        [path isEqualToString:@"/v1/config"] ||
+        [path isEqualToString:@"/v1/config/"] ||
+        [path isEqualToString:@"/v2/config"] ||
+        [path isEqualToString:@"/v2/config/"];
+    return chatHost && configPath;
+}
+
+static id legacyConfigJsonForResponse(id self) {
+    if (!responseIsRemoteConfig(self)) return nil;
+
+    if (!gLoggedLegacyConfigJson) {
+        gLoggedLegacyConfigJson = YES;
+        appendTrace([NSString stringWithFormat:
+            @"[%@] REMOTE-CONFIG HTTPResponseImpl translated to Signal-7.19 schema; cdsiLibsignal=0.",
+            timestamp()]);
+    }
+
+    return @{
+        @"config": @[
+            @{@"name": @"ios.cdsiLookup.libsignal", @"enabled": @NO},
+            @{@"name": @"ios.experimentalTransportEnabled.libsignal", @"enabled": @NO},
+            @{@"name": @"ios.experimentalTransportEnabled.libsignalAuth", @"enabled": @NO},
+            @{@"name": @"ios.experimentalTransportEnabled.shadowing", @"enabled": @NO}
+        ],
+        @"serverEpochTime": @((unsigned long long)[NSDate date].timeIntervalSince1970)
+    };
+}
+
+static id hookedHTTPResponseBodyJson(id self, SEL sel) {
+    id replacement = legacyConfigJsonForResponse(self);
+    if (replacement) return replacement;
+    return originalHTTPResponseBodyJson
+        ? originalHTTPResponseBodyJson(self, sel)
+        : nil;
+}
+
+static id hookedHTTPResponseResponseBodyJson(id self, SEL sel) {
+    id replacement = legacyConfigJsonForResponse(self);
+    if (replacement) return replacement;
+    return originalHTTPResponseResponseBodyJson
+        ? originalHTTPResponseResponseBodyJson(self, sel)
+        : nil;
+}
+
+static void installHTTPResponseRemoteConfigAdapter(void) {
+    Class cls = NSClassFromString(@"SignalServiceKit.HTTPResponseImpl");
+    if (!cls) cls = objc_getClass("_TtC16SignalServiceKit16HTTPResponseImpl");
+    if (!cls) cls = objc_getClass("HTTPResponseImpl");
+
+    install(cls,
+            NSSelectorFromString(@"bodyJson"),
+            (IMP)hookedHTTPResponseBodyJson,
+            (IMP *)&originalHTTPResponseBodyJson);
+
+    install(cls,
+            NSSelectorFromString(@"responseBodyJson"),
+            (IMP)hookedHTTPResponseResponseBodyJson,
+            (IMP *)&originalHTTPResponseResponseBodyJson);
+
+    appendTrace([NSString stringWithFormat:
+        @"Remote-config HTTPResponse hooks: class=%@ bodyJson=%@ responseBodyJson=%@.",
+        NSStringFromClass(cls) ?: @"<none>",
+        originalHTTPResponseBodyJson ? @"yes" : @"no",
+        originalHTTPResponseResponseBodyJson ? @"yes" : @"no"]);
+}
+
 typedef BOOL (*RemoteConfigBoolGetterFn)(id, SEL);
 static RemoteConfigBoolGetterFn originalCdsiLookupObjCGetter;
 static BOOL gLoggedCdsiGetter = NO;
@@ -1329,7 +1412,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.7 only prevents this reminder view from becoming visible; it does
+    // v1.5.8 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -1360,7 +1443,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.7 forced native CDSI\nApp: %@ (%@)\niOS: %@\nV1.5.6 proved /v2/config returns 200 but the old client still stayed on the libsignal CDSI path. This build directly forces RemoteConfig.cdsiLookupWithLibsignal=false and also hardens v2->legacy config translation.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.8 remote-config consumer fix\nApp: %@ (%@)\niOS: %@\nV1.5.7 hooked the exported CDSI flag thunk but it was never called. This build translates /v2/config at HTTPResponseImpl.responseBodyJson/bodyJson, where Signal 7.19.1 actually parses remote config, forcing native CDSI through cached config.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
@@ -1387,6 +1470,7 @@ __attribute__((constructor)) static void start(void) {
         }
 
         installCdsiRemoteConfigForce(provider);
+        installHTTPResponseRemoteConfigAdapter();
 
         Class sessionClass = [NSURLSession.sharedSession class];
 
