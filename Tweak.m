@@ -8,12 +8,15 @@
 #import <string.h>
 #include <stdbool.h>
 
-// v1.5.13: keep the v1.5.12 CDSI path and target the next concrete compatibility
-// gap: current delivery certificates use UUID bytes (field 7) and a referenced
-// server-certificate id (field 8), while Signal 7.19.1/libsignal 0.52 expects a
-// UUID string (field 6) and an embedded signer (field 5). A second helper is
-// built from the exact v0.52 source with only its certificate parser modernized,
-// preserving the original SenderCertificate layout for the old app.
+// v1.5.14: v1.5.13 reaches /v1/messages and gets one tick, but a modern
+// recipient shows "could not be delivered", while modern -> iOS 14 traffic also
+// never becomes a visible message. Signal 7.19.1 ships libsignal 0.52, before
+// SPQR was integrated (libsignal 0.74). Registration currently has to advertise
+// spqr=true to pass the new-device gate. After registration, current Signal-Server
+// still exposes authenticated PUT /v1/devices/capabilities and directly replaces
+// the device capability set. Use the authenticated chat websocket credentials to
+// correct this old device to spqr=false, then trace inbound crypto stages so we
+// can distinguish stale SPQR sessions from any remaining Sealed Sender issue.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
@@ -105,6 +108,16 @@ typedef SignalFfiError *(*SBSenderCertValidateKnownRootsFn)(
 typedef SignalFfiError *(*SBOriginalSenderCertValidateFn)(
     bool *, const SignalSenderCertificate *, const SignalPublicKey *, uint64_t);
 
+typedef SignalFfiError *(*SBDeserializeMessageFn)(void **, SBSignalBorrowedBuffer);
+typedef SignalFfiError *(*SBMessageVersionFn)(uint32_t *, const void *);
+typedef SignalFfiError *(*SBSealedDecryptToUsmcFn)(
+    void **, SBSignalBorrowedBuffer, const void *);
+typedef SignalFfiError *(*SBDecryptMessageFn)(
+    SBSignalOwnedBuffer *, const void *, const void *, const void *, const void *);
+typedef SignalFfiError *(*SBDecryptPreKeyFn)(
+    SBSignalOwnedBuffer *, const void *, const void *, const void *, const void *,
+    const void *, const void *, const void *);
+
 static SBCdsiNewFn pqCdsiNew;
 static SBSgxDestroyFn pqSgxDestroy;
 static SBSgxInitialFn pqSgxInitial;
@@ -128,6 +141,15 @@ static SBErrorFreeFn certErrorFree;
 static SBSenderCertDeserializeFn originalSenderCertDeserialize;
 static SBSenderCertDestroyFn originalSenderCertDestroy;
 static SBOriginalSenderCertValidateFn originalSenderCertValidate;
+
+static SBDeserializeMessageFn originalUsmcDeserialize;
+static SBDeserializeMessageFn originalSignalMessageDeserialize;
+static SBDeserializeMessageFn originalPreKeyMessageDeserialize;
+static SBMessageVersionFn originalSignalMessageVersion;
+static SBMessageVersionFn originalPreKeyMessageVersion;
+static SBSealedDecryptToUsmcFn originalSealedDecryptToUsmc;
+static SBDecryptMessageFn originalDecryptMessage;
+static SBDecryptPreKeyFn originalDecryptPreKeyMessage;
 
 static SBCdsiNewFn originalCdsiNew;
 static SBSgxDestroyFn originalSgxDestroy;
@@ -571,6 +593,192 @@ static BOOL installSenderCertificateBridge(void) {
         hooksReady ? @"ready" : @"partial"]);
 
     return helperReady && hooksReady;
+}
+
+
+static NSString *bundledFfiErrorSummary(SignalFfiError *error) {
+    if (!error) return @"none";
+
+    uint32_t type = originalSignalErrorType ? originalSignalErrorType(error) : 0;
+    NSString *messageString = nil;
+
+    if (originalSignalErrorMessage && originalSignalFreeString) {
+        const char *message = NULL;
+        SignalFfiError *secondary = originalSignalErrorMessage(error, &message);
+        if (!secondary && message) {
+            messageString = [NSString stringWithUTF8String:message];
+            originalSignalFreeString(message);
+        } else if (secondary && originalSignalErrorFree) {
+            originalSignalErrorFree(secondary);
+        }
+    }
+
+    if (!messageString.length) messageString = @"<no-message>";
+    return [NSString stringWithFormat:@"type=%u msg=%@", type, messageString];
+}
+
+static SignalFfiError *tracedUsmcDeserialize(void **out, SBSignalBorrowedBuffer data) {
+    SignalFfiError *error = originalUsmcDeserialize
+        ? originalUsmcDeserialize(out, data)
+        : NULL;
+    appendTrace([NSString stringWithFormat:
+        @"[%@] INBOUND USMC-DESERIALIZE bytes=%lu result=%@ error=%@",
+        timestamp(),
+        (unsigned long)data.length,
+        error ? @"error" : @"ok",
+        bundledFfiErrorSummary(error)]);
+    return error;
+}
+
+static SignalFfiError *tracedSignalMessageDeserialize(void **out, SBSignalBorrowedBuffer data) {
+    SignalFfiError *error = originalSignalMessageDeserialize
+        ? originalSignalMessageDeserialize(out, data)
+        : NULL;
+
+    uint32_t version = 0;
+    if (!error && out && *out && originalSignalMessageVersion) {
+        SignalFfiError *versionError = originalSignalMessageVersion(&version, *out);
+        if (versionError && originalSignalErrorFree) originalSignalErrorFree(versionError);
+    }
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] INBOUND SIGNAL-MESSAGE-DESERIALIZE bytes=%lu version=%u result=%@ error=%@",
+        timestamp(),
+        (unsigned long)data.length,
+        version,
+        error ? @"error" : @"ok",
+        bundledFfiErrorSummary(error)]);
+    return error;
+}
+
+static SignalFfiError *tracedPreKeyMessageDeserialize(void **out, SBSignalBorrowedBuffer data) {
+    SignalFfiError *error = originalPreKeyMessageDeserialize
+        ? originalPreKeyMessageDeserialize(out, data)
+        : NULL;
+
+    uint32_t version = 0;
+    if (!error && out && *out && originalPreKeyMessageVersion) {
+        SignalFfiError *versionError = originalPreKeyMessageVersion(&version, *out);
+        if (versionError && originalSignalErrorFree) originalSignalErrorFree(versionError);
+    }
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] INBOUND PREKEY-DESERIALIZE bytes=%lu version=%u result=%@ error=%@",
+        timestamp(),
+        (unsigned long)data.length,
+        version,
+        error ? @"error" : @"ok",
+        bundledFfiErrorSummary(error)]);
+    return error;
+}
+
+static SignalFfiError *tracedSealedDecryptToUsmc(
+    void **out,
+    SBSignalBorrowedBuffer ciphertext,
+    const void *identityStore) {
+
+    SignalFfiError *error = originalSealedDecryptToUsmc
+        ? originalSealedDecryptToUsmc(out, ciphertext, identityStore)
+        : NULL;
+    appendTrace([NSString stringWithFormat:
+        @"[%@] INBOUND SEALED-UNWRAP bytes=%lu result=%@ error=%@",
+        timestamp(),
+        (unsigned long)ciphertext.length,
+        error ? @"error" : @"ok",
+        bundledFfiErrorSummary(error)]);
+    return error;
+}
+
+static SignalFfiError *tracedDecryptMessage(
+    SBSignalOwnedBuffer *out,
+    const void *message,
+    const void *address,
+    const void *sessionStore,
+    const void *identityStore) {
+
+    SignalFfiError *error = originalDecryptMessage
+        ? originalDecryptMessage(out, message, address, sessionStore, identityStore)
+        : NULL;
+    appendTrace([NSString stringWithFormat:
+        @"[%@] INBOUND SESSION-DECRYPT kind=whisper plainBytes=%lu result=%@ error=%@",
+        timestamp(),
+        (unsigned long)(out ? out->length : 0),
+        error ? @"error" : @"ok",
+        bundledFfiErrorSummary(error)]);
+    return error;
+}
+
+static SignalFfiError *tracedDecryptPreKeyMessage(
+    SBSignalOwnedBuffer *out,
+    const void *message,
+    const void *address,
+    const void *sessionStore,
+    const void *identityStore,
+    const void *preKeyStore,
+    const void *signedPreKeyStore,
+    const void *kyberPreKeyStore) {
+
+    SignalFfiError *error = originalDecryptPreKeyMessage
+        ? originalDecryptPreKeyMessage(
+            out, message, address, sessionStore, identityStore,
+            preKeyStore, signedPreKeyStore, kyberPreKeyStore)
+        : NULL;
+    appendTrace([NSString stringWithFormat:
+        @"[%@] INBOUND SESSION-DECRYPT kind=prekey plainBytes=%lu result=%@ error=%@",
+        timestamp(),
+        (unsigned long)(out ? out->length : 0),
+        error ? @"error" : @"ok",
+        bundledFfiErrorSummary(error)]);
+    return error;
+}
+
+static void installInboundCryptoTrace(void) {
+    if (!hookFunction) return;
+
+#define INBOUND_HOOK(symbolName, replacement, original) do { \
+    void *symbol = dlsym(RTLD_DEFAULT, symbolName); \
+    if (symbol) hookFunction(symbol, (void *)(replacement), (void **)&(original)); \
+} while (0)
+
+    INBOUND_HOOK(
+        "signal_unidentified_sender_message_content_deserialize",
+        tracedUsmcDeserialize,
+        originalUsmcDeserialize);
+    INBOUND_HOOK(
+        "signal_message_deserialize",
+        tracedSignalMessageDeserialize,
+        originalSignalMessageDeserialize);
+    INBOUND_HOOK(
+        "signal_pre_key_signal_message_deserialize",
+        tracedPreKeyMessageDeserialize,
+        originalPreKeyMessageDeserialize);
+    INBOUND_HOOK(
+        "signal_sealed_session_cipher_decrypt_to_usmc",
+        tracedSealedDecryptToUsmc,
+        originalSealedDecryptToUsmc);
+    INBOUND_HOOK(
+        "signal_decrypt_message",
+        tracedDecryptMessage,
+        originalDecryptMessage);
+    INBOUND_HOOK(
+        "signal_decrypt_pre_key_message",
+        tracedDecryptPreKeyMessage,
+        originalDecryptPreKeyMessage);
+#undef INBOUND_HOOK
+
+    originalSignalMessageVersion = (SBMessageVersionFn)dlsym(
+        RTLD_DEFAULT, "signal_message_get_message_version");
+    originalPreKeyMessageVersion = (SBMessageVersionFn)dlsym(
+        RTLD_DEFAULT, "signal_pre_key_signal_message_get_version");
+
+    appendTrace([NSString stringWithFormat:
+        @"Inbound crypto trace: sealed=%@ usmc=%@ signal=%@ prekey=%@ decrypt=%@ decryptPrekey=%@.",
+        originalSealedDecryptToUsmc ? @"yes" : @"no",
+        originalUsmcDeserialize ? @"yes" : @"no",
+        originalSignalMessageDeserialize ? @"yes" : @"no",
+        originalPreKeyMessageDeserialize ? @"yes" : @"no",
+        originalDecryptMessage ? @"yes" : @"no",
+        originalDecryptPreKeyMessage ? @"yes" : @"no"]);
 }
 
 static BOOL isSignalHost(NSString *host) {
@@ -1145,6 +1353,76 @@ static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLReques
 }
 
 
+
+static BOOL gSpqrCapabilityCorrectionInFlight = NO;
+static BOOL gSpqrCapabilityCorrectionDone = NO;
+
+static void maybeCorrectStoredSpqrCapability(NSURLRequest *authenticatedRequest) {
+    if (!authenticatedRequest || gSpqrCapabilityCorrectionDone) return;
+
+    NSString *host = authenticatedRequest.URL.host.lowercaseString ?: @"";
+    NSString *auth = [authenticatedRequest valueForHTTPHeaderField:@"Authorization"];
+    if (![host isEqualToString:@"chat.signal.org"] || !auth.length) return;
+
+    @synchronized (NSFileHandle.class) {
+        if (gSpqrCapabilityCorrectionDone || gSpqrCapabilityCorrectionInFlight) return;
+        gSpqrCapabilityCorrectionInFlight = YES;
+    }
+
+    NSURL *url = [NSURL URLWithString:@"https://chat.signal.org/v1/devices/capabilities"];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.HTTPMethod = @"PUT";
+    [request setValue:auth forHTTPHeaderField:@"Authorization"];
+    [request setValue:workingUserAgent forHTTPHeaderField:@"User-Agent"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+
+    // These are the capabilities the 7.19 client can truthfully advertise to
+    // current Signal-Server. Unknown legacy keys are ignored by the server.
+    // storage=false avoids falsely claiming an SVR backup when we cannot safely
+    // inspect that local state from the tweak.
+    NSDictionary *caps = @{
+        @"transfer": @YES,
+        @"storage": @NO,
+        @"pni": @YES,
+        @"paymentActivation": @YES,
+        @"deleteSync": @YES,
+        @"spqr": @NO
+    };
+    NSData *body = [NSJSONSerialization dataWithJSONObject:caps options:0 error:nil];
+    request.HTTPBody = body;
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] SPQR-CAPABILITY correcting stored device capability to false.",
+        timestamp()]);
+
+    NSURLSessionDataTask *task =
+        [NSURLSession.sharedSession dataTaskWithRequest:request
+                                     completionHandler:^(NSData *data,
+                                                         NSURLResponse *response,
+                                                         NSError *error) {
+        NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class]
+            ? ((NSHTTPURLResponse *)response).statusCode
+            : -1;
+
+        BOOL success = !error && status >= 200 && status < 300;
+        @synchronized (NSFileHandle.class) {
+            gSpqrCapabilityCorrectionInFlight = NO;
+            if (success) gSpqrCapabilityCorrectionDone = YES;
+        }
+
+        appendTrace([NSString stringWithFormat:
+            @"[%@] SPQR-CAPABILITY response status=%ld result=%@ error=%@",
+            timestamp(),
+            (long)status,
+            success ? @"ok" : @"failed",
+            error ? [NSString stringWithFormat:@"%@/%ld", error.domain, (long)error.code] : @"none"]);
+
+        (void)data;
+    }];
+    [task resume];
+}
+
 typedef NSURLSessionWebSocketTask *(*WebSocketURLFn)(id, SEL, NSURL *);
 typedef NSURLSessionWebSocketTask *(*WebSocketRequestFn)(id, SEL, NSURLRequest *);
 
@@ -1308,13 +1586,20 @@ static NSURLSessionWebSocketTask *webSocketRequestTask(id self,
                                                         SEL sel,
                                                         NSURLRequest *request) {
     NSMutableURLRequest *rewritten = rewriteLegacyChatWebSocket(self, request, nil);
-    return originalWebSocketRequest(self, sel, rewritten ?: request);
+    NSURLRequest *finalRequest = rewritten ?: request;
+    if (isLegacyChatWebSocketURL(finalRequest.URL)) {
+        maybeCorrectStoredSpqrCapability(finalRequest);
+    }
+    return originalWebSocketRequest(self, sel, finalRequest);
 }
 
 static NSURLSessionWebSocketTask *webSocketURLTask(id self, SEL sel, NSURL *url) {
     if (isTrackedSignalWebSocketURL(url) && originalWebSocketRequest) {
         NSMutableURLRequest *rewritten = rewriteLegacyChatWebSocket(self, nil, url);
         if (rewritten) {
+            if (isLegacyChatWebSocketURL(rewritten.URL)) {
+                maybeCorrectStoredSpqrCapability(rewritten);
+            }
             return originalWebSocketRequest(self,
                                             @selector(webSocketTaskWithRequest:),
                                             rewritten);
@@ -1923,7 +2208,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.13 only prevents this reminder view from becoming visible; it does
+    // v1.5.14 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -1954,7 +2239,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.13 sender-certificate compatibility\nApp: %@ (%@)\niOS: %@\nKeeps v1.5.12 CDSI. Adds an exact-libsignal-0.52 sender-certificate parser that accepts current UUID-bytes/signer-id certificates and validates them against both the legacy and current production Sealed Sender trust roots.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.14 SPQR capability correction\nApp: %@ (%@)\niOS: %@\nKeeps v1.5.13. After the authenticated chat websocket is built, corrects the stored device capability to spqr=false so current peers can downgrade to the old client's pre-SPQR crypto. Also traces inbound Sealed Sender and session-decrypt stages.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
@@ -1981,6 +2266,7 @@ __attribute__((constructor)) static void start(void) {
 
         installCdsiPQBridge();
         installSenderCertificateBridge();
+        installInboundCryptoTrace();
         installCdsiRemoteConfigForce(provider);
         installHTTPResponseRemoteConfigAdapter();
 

@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.13-rootful
+          name: SignalBypass14-1.5.14-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,40 +43,43 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.5.13 keeps the v1.5.12 CDSI changes and targets a separate
-          compatibility break in Sealed Sender certificates.
+          v1.5.13 fixed the original sender-side block: messages reach
+          /v1/messages and the sender UI reaches one tick. A modern receiving
+          phone then reports "A message from ... could not be delivered", and
+          modern -> iOS 14 messages also fail to become visible.
 
-          Signal 7.19.1/libsignal 0.52 expects:
-          - sender UUID as protobuf field 6 string
-          - an embedded ServerCertificate in field 5
-          - the original production Sealed Sender trust root
+          The important compatibility fact is now concrete:
+          - Signal 7.19.1 bundles libsignal 0.52
+          - SPQR was integrated in libsignal 0.74 as an opt-in/downgrade protocol
+          - current Signal-Server requires new devices to advertise the public
+            "spqr" capability at registration
+          - our registration shim had to inject spqr=true even though 0.52
+            cannot actually participate in SPQR sessions
 
-          Current Signal-Server generates:
-          - sender UUID as 16-byte field 7
-          - signer as referenced certificate id in field 8
-          - production signer id 3, chained to the newer production trust root
+          Current Signal-Server also exposes authenticated
+          PUT /v1/devices/capabilities. v1.5.14 uses the already-authenticated
+          chat websocket credentials to correct this device to spqr=false after
+          registration, allowing modern peers to negotiate/downgrade correctly.
 
-          This build:
-          - checks out the exact libsignal v0.52.0 source used by the old client
-          - changes only SenderCertificate protobuf parsing/encoding compatibility
-          - resolves known signer ids 2/3 to Signal's published server certificates
-          - keeps SenderCertificate's Rust struct layout unchanged
-          - hooks only sender-certificate deserialize/destroy/validate
-          - validates against both the legacy and current production trust roots
-          - does not bypass certificate signatures or expiry validation
-          - preserves the original serialized certificate bytes, so the server
-            signature remains valid and the same certificate is sent to recipients
-          - keeps all non-certificate Signal 7.19.1 crypto on its original libsignal
+          The correction body truthfully retains the old client's transfer
+          capability, clears storage rather than falsely claiming an SVR backup,
+          and includes legacy capability names (ignored by current server).
+          No message/session crypto is bypassed.
 
-          Expected log markers:
-          - SENDER-CERT bridge: parser=v0.52-modernized ... hooks=ready
-          - SENDER-CERT deserialize ... result=ok
-          - SENDER-CERT validate ... valid=yes
-          - then CDSI/session setup and /v1/messages/<recipient>
+          v1.5.14 also adds content-safe inbound crypto stage tracing:
+          - Sealed Sender unwrap
+          - USMC / SignalMessage / PreKey deserialization
+          - whisper/prekey session decrypt result and libsignal error type/message
+
+          Expected markers:
+          - SPQR-CAPABILITY correcting stored device capability to false
+          - SPQR-CAPABILITY response status=2xx result=ok
+          - INBOUND SEALED-UNWRAP ...
+          - INBOUND SESSION-DECRYPT ...
           NOTES
 
-          gh release create v1.5.13 build/uk.551.signalbypass14_1.5.13_iphoneos-arm.deb \
+          gh release create v1.5.14 build/uk.551.signalbypass14_1.5.14_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.13' \
+            --title 'Signal Bypass iOS 14 v1.5.14' \
             --notes-file build/release-notes.md \
             --prerelease
