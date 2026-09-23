@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.5-rootful
+          name: SignalBypass14-1.5.6-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,33 +43,28 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.5.4 proved the websocket path is healthy: both sockets upgrade
-          with HTTP 101 and normal authenticated requests return 200, but the
-          actual /v1/messages/<recipient> request never begins.
+          v1.5.5 showed a concrete pre-send failure pattern:
+          - /v2/directory/auth repeatedly succeeds with HTTP 200
+          - legacy /v1/config repeatedly returns HTTP 404
+          - no /v1/messages/<recipient> request is ever created
 
-          v1.5.5 keeps all v1.5.4 websocket/auth behavior and adds two targeted
-          changes for the pre-send stage:
-          - restores the Signal 8.29 CDSI enclave measurement compatibility patch
-          - logs method/redacted path/status for all Signal HTTP tasks
+          Signal 7.19.1 defaults CDSI lookups to its old libsignal networking path
+          when the remote flag is absent. Because /v1/config is retired, that flag
+          never refreshes. v1.5.6 therefore:
+          - rewrites /v1/config/ to the modern /v2/config/ endpoint
+          - translates the response to Signal 7.19.1's old config schema
+          - explicitly sets ios.cdsiLookup.libsignal=false
+          - keeps both chat libsignal flags and websocket shadowing false
+          - restores/retains the Signal 8.29 CDSI MrEnclave patch
+          - applies the 8.29/iOS 16.2 UA to native CDSI websocket creation
+          - logs CDSI websocket open/frame/close state without payload contents
 
-          This is aimed at the old MessageSender path before message submission:
-          sender-certificate fetch, contact discovery, recipient prekey/session
-          setup and any REST fallback can now be distinguished without logging
-          message bodies, credentials, recipient IDs, headers or response text.
-
-          Preserved:
-          - websocket query credentials -> HTTP Basic
-          - ud-chat.signal.org -> chat.signal.org
-          - Signal 8.29/iOS 16.2 websocket User-Agent
-          - websocket protobuf request/response-status diagnostics
-          - Signal 7.19.1-era client state with the existing BuildDetails handling
-          - registration/login, spqr=true and /v2/keys compatibility
-          - unsupported-iOS banner suppression
-          - legacy SSK transport with libsignal flags reset to false
+          Existing registration, expiry, websocket Basic-auth and message-status
+          diagnostics are preserved.
           NOTES
 
-          gh release create v1.5.5 build/uk.551.signalbypass14_1.5.5_iphoneos-arm.deb \
+          gh release create v1.5.6 build/uk.551.signalbypass14_1.5.6_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.5' \
+            --title 'Signal Bypass iOS 14 v1.5.6' \
             --notes-file build/release-notes.md \
             --prerelease
