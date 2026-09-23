@@ -7,14 +7,17 @@
 #import <unistd.h>
 #import <string.h>
 
-// v1.5.6: v1.5.5 showed the send path repeatedly obtains /v2/directory/auth
-// but never reaches /v1/messages/<recipient>, while the legacy /v1/config endpoint
-// is now 404. Modernize remote-config to /v2/config and feed Signal 7.19.1 a
-// minimal old-format config that forces CDSI onto its native SGX websocket path.
-// Keep the working chat websocket/auth fixes and the Signal-8.29 CDSI enclave.
+// v1.5.7: v1.5.6 proves /v2/config itself is reachable (HTTP 200), but the
+// old app still retries config/directory auth and never creates a CDSI websocket.
+// The v2->legacy response adapter was not reached on-device. Force the exact
+// RemoteConfig.cdsiLookupWithLibsignal getter to false at runtime (Swift symbol
+// hook plus Objective-C fallback), and make v2 config response translation key
+// only off the final request path so nested NSURLSession rewriting cannot miss it.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
+typedef void (*HookFunction)(void *, void *, void **);
 static HookMessage hookMessage;
+static HookFunction hookFunction;
 
 static NSString *const workingUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.2";
 
@@ -355,8 +358,7 @@ static NSData *rewriteRemoteConfigResponseData(NSURLRequest *originalRequest,
                                                NSData *responseData,
                                                NSURLResponse *response,
                                                NSError *error) {
-    if (!isLegacyRemoteConfigRequest(originalRequest) ||
-        !isModernRemoteConfigRequest(finalRequest) ||
+    if (!isModernRemoteConfigRequest(finalRequest) ||
         error ||
         ![response isKindOfClass:NSHTTPURLResponse.class] ||
         ((NSHTTPURLResponse *)response).statusCode != 200) {
@@ -1247,12 +1249,87 @@ static void tracedOWSTaskDidComplete(id self,
     originalOWSTaskDidComplete(self, sel, session, task, error);
 }
 
+
+static void install(Class cls, SEL selector, IMP replacement, IMP *original);
+
+typedef BOOL (*RemoteConfigBoolGetterFn)(id, SEL);
+static RemoteConfigBoolGetterFn originalCdsiLookupObjCGetter;
+static BOOL gLoggedCdsiGetter = NO;
+
+static BOOL forcedCdsiLookupObjCGetter(id self, SEL sel) {
+    if (!gLoggedCdsiGetter) {
+        gLoggedCdsiGetter = YES;
+        appendTrace([NSString stringWithFormat:
+            @"[%@] CDSI-FLAG Objective-C getter forced false.",
+            timestamp()]);
+    }
+    return NO;
+}
+
+typedef BOOL (*RemoteConfigSwiftBoolGetterFn)(void);
+static RemoteConfigSwiftBoolGetterFn originalCdsiLookupSwiftGetter;
+static BOOL gLoggedCdsiSwiftGetter = NO;
+
+static BOOL forcedCdsiLookupSwiftGetter(void) {
+    if (!gLoggedCdsiSwiftGetter) {
+        gLoggedCdsiSwiftGetter = YES;
+        appendTrace([NSString stringWithFormat:
+            @"[%@] CDSI-FLAG Swift getter forced false.",
+            timestamp()]);
+    }
+    return NO;
+}
+
+static void installCdsiRemoteConfigForce(void *provider) {
+    BOOL objcInstalled = NO;
+    BOOL swiftInstalled = NO;
+
+    Class remoteConfigClass = NSClassFromString(@"SignalServiceKit.RemoteConfig");
+    if (!remoteConfigClass) remoteConfigClass = objc_getClass("_TtC16SignalServiceKit12RemoteConfig");
+    if (!remoteConfigClass) remoteConfigClass = objc_getClass("RemoteConfig");
+
+    SEL getter = NSSelectorFromString(@"cdsiLookupWithLibsignal");
+    if (remoteConfigClass && class_getClassMethod(remoteConfigClass, getter)) {
+        Class meta = object_getClass(remoteConfigClass);
+        if (meta) {
+            install(meta,
+                    getter,
+                    (IMP)forcedCdsiLookupObjCGetter,
+                    (IMP *)&originalCdsiLookupObjCGetter);
+            objcInstalled = originalCdsiLookupObjCGetter != NULL;
+        }
+    }
+
+    // Swift 5 mangled symbol for:
+    // SignalServiceKit.RemoteConfig.cdsiLookupWithLibsignal.getter : Swift.Bool
+    if (hookFunction) {
+        void *symbol = dlsym(provider ?: RTLD_DEFAULT,
+            "$s16SignalServiceKit12RemoteConfigC23cdsiLookupWithLibsignalSbvgZ");
+        if (!symbol) {
+            symbol = dlsym(RTLD_DEFAULT,
+                "$s16SignalServiceKit12RemoteConfigC23cdsiLookupWithLibsignalSbvgZ");
+        }
+        if (symbol) {
+            hookFunction(symbol,
+                         (void *)forcedCdsiLookupSwiftGetter,
+                         (void **)&originalCdsiLookupSwiftGetter);
+            swiftInstalled = YES;
+        }
+    }
+
+    appendTrace([NSString stringWithFormat:
+        @"CDSI remote-config force: objc=%@ swift=%@ class=%@.",
+        objcInstalled ? @"yes" : @"no",
+        swiftInstalled ? @"yes" : @"no",
+        NSStringFromClass(remoteConfigClass) ?: @"<none>"]);
+}
+
 typedef void (*SetHiddenFn)(id, SEL, BOOL);
 static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.6 only prevents this reminder view from becoming visible; it does
+    // v1.5.7 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -1283,7 +1360,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.6 CDSI/remote-config fix\nApp: %@ (%@)\niOS: %@\nLegacy /v1/config is rewritten to /v2/config and translated to old schema with cdsiLookup.libsignal=false. Native CDSI websocket uses the Signal 8.29 enclave. Existing chat websocket/auth fixes retained.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.7 forced native CDSI\nApp: %@ (%@)\niOS: %@\nV1.5.6 proved /v2/config returns 200 but the old client still stayed on the libsignal CDSI path. This build directly forces RemoteConfig.cdsiLookupWithLibsignal=false and also hardens v2->legacy config translation.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
@@ -1303,10 +1380,13 @@ __attribute__((constructor)) static void start(void) {
 
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
         hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");
+        hookFunction = (HookFunction)dlsym(provider ?: RTLD_DEFAULT, "MSHookFunction");
         if (!hookMessage) {
             appendTrace(@"MSHookMessageEx unavailable.");
             return;
         }
+
+        installCdsiRemoteConfigForce(provider);
 
         Class sessionClass = [NSURLSession.sharedSession class];
 
