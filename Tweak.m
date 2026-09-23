@@ -8,15 +8,15 @@
 #import <string.h>
 #include <stdbool.h>
 
-// v1.5.14: v1.5.13 reaches /v1/messages and gets one tick, but a modern
-// recipient shows "could not be delivered", while modern -> iOS 14 traffic also
-// never becomes a visible message. Signal 7.19.1 ships libsignal 0.52, before
-// SPQR was integrated (libsignal 0.74). Registration currently has to advertise
-// spqr=true to pass the new-device gate. After registration, current Signal-Server
-// still exposes authenticated PUT /v1/devices/capabilities and directly replaces
-// the device capability set. Use the authenticated chat websocket credentials to
-// correct this old device to spqr=false, then trace inbound crypto stages so we
-// can distinguish stale SPQR sessions from any remaining Sealed Sender issue.
+// v1.5.15: v1.5.14 still reaches one tick and the modern recipient reports
+// "could not be delivered". Its attempted spqr=false capability update also
+// failed before reaching the server. Keep v1.5.13's successful sender-certificate
+// compatibility and isolate the next layer: for profile responses only, hide the
+// recipient's Unidentified Delivery verifier from Signal 7.19.1. The stock old
+// client then records UD as disabled and builds a normal authenticated/identified
+// DeviceMessage, bypassing Sealed Sender while leaving session crypto untouched.
+// This is a one-variable diagnostic/fix candidate: if delivery now succeeds, the
+// remaining incompatibility is inside the old Sealed Sender envelope path.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
@@ -1354,75 +1354,6 @@ static NSURLSessionDataTask *dataRequestCompletion(id self, SEL sel, NSURLReques
 
 
 
-static BOOL gSpqrCapabilityCorrectionInFlight = NO;
-static BOOL gSpqrCapabilityCorrectionDone = NO;
-
-static void maybeCorrectStoredSpqrCapability(NSURLRequest *authenticatedRequest) {
-    if (!authenticatedRequest || gSpqrCapabilityCorrectionDone) return;
-
-    NSString *host = authenticatedRequest.URL.host.lowercaseString ?: @"";
-    NSString *auth = [authenticatedRequest valueForHTTPHeaderField:@"Authorization"];
-    if (![host isEqualToString:@"chat.signal.org"] || !auth.length) return;
-
-    @synchronized (NSFileHandle.class) {
-        if (gSpqrCapabilityCorrectionDone || gSpqrCapabilityCorrectionInFlight) return;
-        gSpqrCapabilityCorrectionInFlight = YES;
-    }
-
-    NSURL *url = [NSURL URLWithString:@"https://chat.signal.org/v1/devices/capabilities"];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    request.HTTPMethod = @"PUT";
-    [request setValue:auth forHTTPHeaderField:@"Authorization"];
-    [request setValue:workingUserAgent forHTTPHeaderField:@"User-Agent"];
-    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-
-    // These are the capabilities the 7.19 client can truthfully advertise to
-    // current Signal-Server. Unknown legacy keys are ignored by the server.
-    // storage=false avoids falsely claiming an SVR backup when we cannot safely
-    // inspect that local state from the tweak.
-    NSDictionary *caps = @{
-        @"transfer": @YES,
-        @"storage": @NO,
-        @"pni": @YES,
-        @"paymentActivation": @YES,
-        @"deleteSync": @YES,
-        @"spqr": @NO
-    };
-    NSData *body = [NSJSONSerialization dataWithJSONObject:caps options:0 error:nil];
-    request.HTTPBody = body;
-
-    appendTrace([NSString stringWithFormat:
-        @"[%@] SPQR-CAPABILITY correcting stored device capability to false.",
-        timestamp()]);
-
-    NSURLSessionDataTask *task =
-        [NSURLSession.sharedSession dataTaskWithRequest:request
-                                     completionHandler:^(NSData *data,
-                                                         NSURLResponse *response,
-                                                         NSError *error) {
-        NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class]
-            ? ((NSHTTPURLResponse *)response).statusCode
-            : -1;
-
-        BOOL success = !error && status >= 200 && status < 300;
-        @synchronized (NSFileHandle.class) {
-            gSpqrCapabilityCorrectionInFlight = NO;
-            if (success) gSpqrCapabilityCorrectionDone = YES;
-        }
-
-        appendTrace([NSString stringWithFormat:
-            @"[%@] SPQR-CAPABILITY response status=%ld result=%@ error=%@",
-            timestamp(),
-            (long)status,
-            success ? @"ok" : @"failed",
-            error ? [NSString stringWithFormat:@"%@/%ld", error.domain, (long)error.code] : @"none"]);
-
-        (void)data;
-    }];
-    [task resume];
-}
-
 typedef NSURLSessionWebSocketTask *(*WebSocketURLFn)(id, SEL, NSURL *);
 typedef NSURLSessionWebSocketTask *(*WebSocketRequestFn)(id, SEL, NSURLRequest *);
 
@@ -1587,9 +1518,6 @@ static NSURLSessionWebSocketTask *webSocketRequestTask(id self,
                                                         NSURLRequest *request) {
     NSMutableURLRequest *rewritten = rewriteLegacyChatWebSocket(self, request, nil);
     NSURLRequest *finalRequest = rewritten ?: request;
-    if (isLegacyChatWebSocketURL(finalRequest.URL)) {
-        maybeCorrectStoredSpqrCapability(finalRequest);
-    }
     return originalWebSocketRequest(self, sel, finalRequest);
 }
 
@@ -1597,9 +1525,6 @@ static NSURLSessionWebSocketTask *webSocketURLTask(id self, SEL sel, NSURL *url)
     if (isTrackedSignalWebSocketURL(url) && originalWebSocketRequest) {
         NSMutableURLRequest *rewritten = rewriteLegacyChatWebSocket(self, nil, url);
         if (rewritten) {
-            if (isLegacyChatWebSocketURL(rewritten.URL)) {
-                maybeCorrectStoredSpqrCapability(rewritten);
-            }
             return originalWebSocketRequest(self,
                                             @selector(webSocketTaskWithRequest:),
                                             rewritten);
@@ -2072,6 +1997,46 @@ static BOOL responseIsRemoteConfig(id self) {
     return chatHost && configPath;
 }
 
+
+static BOOL responseIsProfile(id self) {
+    NSURL *requestUrl = nil;
+    @try {
+        id value = [self valueForKey:@"requestUrl"];
+        if ([value isKindOfClass:NSURL.class]) requestUrl = value;
+    } @catch (__unused NSException *e) {}
+
+    NSString *host = requestUrl.host.lowercaseString ?: @"";
+    NSString *path = requestUrl.path.lowercaseString ?: @"";
+    return [host isEqualToString:@"chat.signal.org"] &&
+           ([path isEqualToString:@"/v1/profile"] ||
+            [path hasPrefix:@"/v1/profile/"]);
+}
+
+static BOOL gLoggedIdentifiedSendProfile = NO;
+
+static id profileJsonForIdentifiedSend(id self, id json) {
+    if (!responseIsProfile(self) || ![json isKindOfClass:NSDictionary.class]) {
+        return json;
+    }
+
+    NSMutableDictionary *profile = [(NSDictionary *)json mutableCopy];
+
+    // Signal 7.19.1's ProfileFetcherJob treats a missing verifier as
+    // UnidentifiedAccessMode.disabled. That naturally makes MessageSender pass
+    // sealedSenderParameters=nil and use the normal authenticated send path.
+    [profile removeObjectForKey:@"unidentifiedAccess"];
+    profile[@"unrestrictedUnidentifiedAccess"] = @NO;
+
+    if (!gLoggedIdentifiedSendProfile) {
+        gLoggedIdentifiedSendProfile = YES;
+        appendTrace([NSString stringWithFormat:
+            @"[%@] IDENTIFIED-SEND profile compatibility: UD verifier hidden; Sealed Sender disabled for recipient sends.",
+            timestamp()]);
+    }
+
+    return profile;
+}
+
 static id legacyConfigJsonForResponse(id self) {
     if (!responseIsRemoteConfig(self)) return nil;
 
@@ -2096,17 +2061,21 @@ static id legacyConfigJsonForResponse(id self) {
 static id hookedHTTPResponseBodyJson(id self, SEL sel) {
     id replacement = legacyConfigJsonForResponse(self);
     if (replacement) return replacement;
-    return originalHTTPResponseBodyJson
+
+    id json = originalHTTPResponseBodyJson
         ? originalHTTPResponseBodyJson(self, sel)
         : nil;
+    return profileJsonForIdentifiedSend(self, json);
 }
 
 static id hookedHTTPResponseResponseBodyJson(id self, SEL sel) {
     id replacement = legacyConfigJsonForResponse(self);
     if (replacement) return replacement;
-    return originalHTTPResponseResponseBodyJson
+
+    id json = originalHTTPResponseResponseBodyJson
         ? originalHTTPResponseResponseBodyJson(self, sel)
         : nil;
+    return profileJsonForIdentifiedSend(self, json);
 }
 
 static void installHTTPResponseRemoteConfigAdapter(void) {
@@ -2208,7 +2177,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.14 only prevents this reminder view from becoming visible; it does
+    // v1.5.15 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -2239,7 +2208,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.14 SPQR capability correction\nApp: %@ (%@)\niOS: %@\nKeeps v1.5.13. After the authenticated chat websocket is built, corrects the stored device capability to spqr=false so current peers can downgrade to the old client's pre-SPQR crypto. Also traces inbound Sealed Sender and session-decrypt stages.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.15 identified-send isolation\nApp: %@ (%@)\niOS: %@\nKeeps v1.5.13 sender-certificate/CDSI compatibility. For recipient profile responses, forces UD disabled so Signal 7.19.1 sends normal authenticated DeviceMessages instead of Sealed Sender. Session crypto is unchanged; inbound crypto tracing remains enabled.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",

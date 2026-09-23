@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.14-rootful
+          name: SignalBypass14-1.5.15-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,43 +43,39 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.5.13 fixed the original sender-side block: messages reach
-          /v1/messages and the sender UI reaches one tick. A modern receiving
-          phone then reports "A message from ... could not be delivered", and
-          modern -> iOS 14 messages also fail to become visible.
+          v1.5.13 fixed the original sender-side block: messages now reach
+          /v1/messages and the sender UI reaches one tick. The modern recipient
+          still shows "A message from ... could not be delivered".
 
-          The important compatibility fact is now concrete:
-          - Signal 7.19.1 bundles libsignal 0.52
-          - SPQR was integrated in libsignal 0.74 as an opt-in/downgrade protocol
-          - current Signal-Server requires new devices to advertise the public
-            "spqr" capability at registration
-          - our registration shim had to inject spqr=true even though 0.52
-            cannot actually participate in SPQR sessions
+          v1.5.14 tried to change the stored SPQR capability, but the device log
+          proved that request never reached the server (NSURLErrorDomain/-1200).
+          This build removes that failed side path and performs a narrower
+          one-variable test.
 
-          Current Signal-Server also exposes authenticated
-          PUT /v1/devices/capabilities. v1.5.14 uses the already-authenticated
-          chat websocket credentials to correct this device to spqr=false after
-          registration, allowing modern peers to negotiate/downgrade correctly.
+          v1.5.15 keeps all v1.5.13 compatibility fixes and changes only the
+          recipient profile view seen by Signal 7.19.1:
+          - remove the profile's unidentifiedAccess verifier
+          - force unrestrictedUnidentifiedAccess=false
+          - the stock 7.19 ProfileFetcherJob therefore records UD as disabled
+          - MessageSender naturally passes sealedSenderParameters=nil
+          - outgoing 1:1 messages use the normal authenticated/identified path
+            instead of Sealed Sender
+          - the underlying libsignal session encryption is unchanged
 
-          The correction body truthfully retains the old client's transfer
-          capability, clears storage rather than falsely claiming an SVR backup,
-          and includes legacy capability names (ignored by current server).
-          No message/session crypto is bypassed.
+          This tells us exactly which layer remains:
+          - if the modern phone now displays the message/two ticks, finish the
+            Sealed Sender compatibility work
+          - if it still shows the delivery/decryption placeholder, move directly
+            to the old 0.52 session/SPQR crypto path
 
-          v1.5.14 also adds content-safe inbound crypto stage tracing:
-          - Sealed Sender unwrap
-          - USMC / SignalMessage / PreKey deserialization
-          - whisper/prekey session decrypt result and libsignal error type/message
+          Inbound crypto stage tracing from v1.5.14 remains enabled.
 
-          Expected markers:
-          - SPQR-CAPABILITY correcting stored device capability to false
-          - SPQR-CAPABILITY response status=2xx result=ok
-          - INBOUND SEALED-UNWRAP ...
-          - INBOUND SESSION-DECRYPT ...
+          Expected marker before the test send:
+          - IDENTIFIED-SEND profile compatibility: UD verifier hidden
           NOTES
 
-          gh release create v1.5.14 build/uk.551.signalbypass14_1.5.14_iphoneos-arm.deb \
+          gh release create v1.5.15 build/uk.551.signalbypass14_1.5.15_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.14' \
+            --title 'Signal Bypass iOS 14 v1.5.15' \
             --notes-file build/release-notes.md \
             --prerelease
