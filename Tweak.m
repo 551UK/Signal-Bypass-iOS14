@@ -40,6 +40,11 @@ static const uint8_t libsignalCurrentCdsiEnclave[32] = {
     0x82,0xdc,0x5d,0x72,0xc9,0x5e,0xf0,0x7b
 };
 
+static NSUInteger patchBytesInLoadedImage(const char *imageNeedle,
+                                          const uint8_t *oldBytes,
+                                          const uint8_t *newBytes,
+                                          size_t length);
+
 static NSUInteger gTraceSequence = 0;
 
 static NSUInteger nextTraceSequence(void) {
