@@ -7,12 +7,12 @@
 #import <unistd.h>
 #import <string.h>
 
-// v1.5.8: v1.5.7 confirmed the Swift RemoteConfig getter symbol can be hooked,
-// but the send path never calls that exported thunk and the app still retries
-// /v2/config + /v2/directory/auth. Translate remote config where Signal 7.19.1
-// actually consumes it: HTTPResponseImpl.responseBodyJson/bodyJson. This lets
-// the old RemoteConfigManager receive its expected array schema and cache
-// ios.cdsiLookup.libsignal=false before ContactDiscoveryV2Operation is created.
+// v1.5.9: v1.5.8 successfully reached native CDSI, but the websocket closed
+// locally with code 1007 before Signal 7.19.1 sent its Noise handshake frame.
+// Test the legacy CDSI enclave that matches libsignal 0.52's pre-PQ Noise NK
+// implementation instead of rewriting it to the current post-quantum enclave.
+// Also trace CDSI inbound frame sizes so we can distinguish attestation receipt
+// from client-side attestation/handshake rejection without logging contents.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
@@ -24,7 +24,7 @@ static NSString *const workingUserAgent = @"Signal-iOS/8.29.0.1866 iOS/16.2";
 // Signal 7.19.1's stale CDSI enclave measurement and the value bundled by
 // Signal 8.29. This patch previously matched one occurrence in SignalServiceKit.
 static const char *oldCdsiMrEnclave = "0f6fd79cdfdaa5b2e6337f534d3baf999318b0c462a7ac1f41297a3e4b424a57";
-static const char *newCdsiMrEnclave = "15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b";
+static const char *newCdsiMrEnclave __attribute__((unused)) = "15637fa1e54fe655176d3df1a9f94b87c01ed377acaa570682dc5d72c95ef07b";
 
 static NSUInteger gTraceSequence = 0;
 
@@ -461,7 +461,7 @@ static void logResponse(NSUInteger sequence,
 }
 
 
-static NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
+static __attribute__((unused)) NSUInteger patchCStringInLoadedImage(const char *imageNeedle,
                                              const char *oldText,
                                              const char *newText) {
     if (!imageNeedle || !oldText || !newText) return 0;
@@ -705,14 +705,16 @@ static NSMutableURLRequest *rewriteLegacyChatWebSocket(id sessionObject,
         components.host = @"chat.signal.org";
     }
 
+    // v1.5.9 deliberately preserves Signal 7.19.1's original CDSI enclave.
+    // That endpoint matches the client's libsignal 0.52 pre-PQ Noise protocol.
+    // We still preserve session headers, Basic auth, and the modern UA below.
     if (isCdsi) {
         NSString *path = components.path ?: @"";
-        NSString *oldEnclave = [NSString stringWithUTF8String:oldCdsiMrEnclave];
-        NSString *newEnclave = [NSString stringWithUTF8String:newCdsiMrEnclave];
-        if ([path containsString:oldEnclave]) {
-            components.path = [path stringByReplacingOccurrencesOfString:oldEnclave
-                                                              withString:newEnclave];
-        }
+        NSString *legacyEnclave = [NSString stringWithUTF8String:oldCdsiMrEnclave];
+        appendTrace([NSString stringWithFormat:
+            @"[%@] CDSI-ENCLAVE mode=legacy pathMatches=%@",
+            timestamp(),
+            [path containsString:legacyEnclave] ? @"yes" : @"no"]);
     }
 
     NSString *login = nil;
@@ -1157,7 +1159,7 @@ static void tracedWebSocketSendMessage(id self,
 static void tracedWebSocketReceiveMessage(id self,
                                           SEL sel,
                                           void (^completion)(NSURLSessionWebSocketMessage *, NSError *)) {
-    BOOL tracked = isSignalChatWebSocketTask(self);
+    BOOL tracked = isTrackedSignalWebSocketTask(self);
     if (!tracked) {
         originalWebSocketReceiveMessage(self, sel, completion);
         return;
@@ -1412,7 +1414,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.8 only prevents this reminder view from becoming visible; it does
+    // v1.5.9 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -1443,23 +1445,14 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.8 remote-config consumer fix\nApp: %@ (%@)\niOS: %@\nV1.5.7 hooked the exported CDSI flag thunk but it was never called. This build translates /v2/config at HTTPResponseImpl.responseBodyJson/bodyJson, where Signal 7.19.1 actually parses remote config, forcing native CDSI through cached config.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.9 legacy CDSI enclave test\nApp: %@ (%@)\niOS: %@\nV1.5.8 reached native CDSI but closed locally with code 1007 before a client handshake frame was sent. This build retains Signal 7.19.1's original 0f6fd79 CDSI enclave to test its matching pre-PQ Noise NK protocol, while preserving the successful remote-config and chat fixes.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
             NSProcessInfo.processInfo.operatingSystemVersionString ?: @"?"
         ]);
 
-        NSUInteger cdsiPatchCount = patchCStringInLoadedImage(
-            "SignalServiceKit.framework/SignalServiceKit",
-            oldCdsiMrEnclave,
-            newCdsiMrEnclave
-        );
-        appendTrace([NSString stringWithFormat:
-            @"CDSI enclave compatibility: %@ (%lu occurrence%@ patched).",
-            cdsiPatchCount ? @"ready" : @"old constant not found",
-            (unsigned long)cdsiPatchCount,
-            cdsiPatchCount == 1 ? @"" : @"s"]);
+        appendTrace(@"CDSI enclave mode: legacy 0f6fd79 retained; current-enclave rewrite disabled.");
 
         void *provider = dlopen("/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
         hookMessage = (HookMessage)dlsym(provider ?: RTLD_DEFAULT, "MSHookMessageEx");

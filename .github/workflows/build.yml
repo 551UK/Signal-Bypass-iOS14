@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.8-rootful
+          name: SignalBypass14-1.5.9-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,30 +43,40 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.5.7 showed:
-          - the exported Swift RemoteConfig.cdsiLookupWithLibsignal symbol was hooked
-          - that thunk was never called by the optimized Signal 7.19.1 send path
-          - /v2/config and /v2/directory/auth still repeat
-          - no CDSI websocket and no /v1/messages/<recipient> request appears
+          v1.5.8 finally reached native CDSI:
+          - remote config translation fired and selected native CDSI
+          - /v2/directory/auth returned 200
+          - the CDSI websocket opened with HTTP 101
+          - Signal 7.19.1 then closed it locally with code 1007 before any
+            client handshake frame was sent
 
-          v1.5.8 moves the compatibility shim to the concrete response object
-          Signal 7.19.1 actually parses:
-          - hooks HTTPResponseImpl.responseBodyJson and bodyJson
-          - for only /v1/config or /v2/config, returns the legacy array schema
-          - sets ios.cdsiLookup.libsignal=false
-          - keeps legacy chat transport/libsignal/shadowing flags false
-          - leaves every non-config response untouched
-          - retains the 8.29 CDSI MrEnclave patch and chat websocket fixes
+          Signal 7.19.1 bundles libsignal 0.52, whose CDSI client uses classic
+          Noise_NK_25519_ChaChaPoly_SHA256. Current CDSI uses the hybrid
+          post-quantum Noise_NKhfs_25519+Kyber1024 protocol. The Signal CDSI
+          source tree also retains a legacy enclave branch matching the old
+          0f6fd79 enclave measurement.
 
-          Expected log markers:
-          - Remote-config HTTPResponse hooks: ... bodyJson=yes responseBodyJson=yes
-          - REMOTE-CONFIG HTTPResponseImpl translated to Signal-7.19 schema
-          - CDSI-WEBSOCKET host=cdsi.signal.org ...
-          - then recipient key/session work and /v1/messages/<recipient>
+          v1.5.9 is a one-variable compatibility test:
+          - keep native CDSI selection from v1.5.8
+          - keep the original 0f6fd79... CDSI enclave/path instead of rewriting
+            it to the current enclave
+          - preserve CDSI Basic auth and modern User-Agent
+          - log inbound CDSI frame sizes as well as outbound sizes
+          - keep all working chat websocket, registration, and expiry fixes
+
+          Success path should show:
+          - CDSI-ENCLAVE mode=legacy pathMatches=yes
+          - CDSI WS-OPEN HTTP 101
+          - CDSI WS-FRAME IN (attestation)
+          - CDSI WS-FRAME OUT (old Noise handshake)
+          - further CDSI frames, then /v1/messages/<recipient>
+
+          If the old enclave endpoint is retired, the websocket status/close
+          in this build will establish that directly.
           NOTES
 
-          gh release create v1.5.8 build/uk.551.signalbypass14_1.5.8_iphoneos-arm.deb \
+          gh release create v1.5.9 build/uk.551.signalbypass14_1.5.9_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.8' \
+            --title 'Signal Bypass iOS 14 v1.5.9' \
             --notes-file build/release-notes.md \
             --prerelease
