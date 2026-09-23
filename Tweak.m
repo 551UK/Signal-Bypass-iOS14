@@ -6,13 +6,14 @@
 #import <mach/mach.h>
 #import <unistd.h>
 #import <string.h>
+#include <stdbool.h>
 
-// v1.5.12: v1.5.11 proved that post-load byte patching one visible c6ff0682...
-// constant does not update the optimized CDSI advisory lookup used by libsignal
-// 0.71. Build the CDSI helper from the official v0.71.0 source instead, with
-// ENCLAVE_ID_CDSI changed at compile time to Signal 8.29's live 15637fa1...
-// measurement. This keeps v0.71's own INTEL-SA-00615/00657 allowance intact
-// without disabling SGX attestation. All non-CDSI crypto stays on libsignal 0.52.
+// v1.5.13: keep the v1.5.12 CDSI path and target the next concrete compatibility
+// gap: current delivery certificates use UUID bytes (field 7) and a referenced
+// server-certificate id (field 8), while Signal 7.19.1/libsignal 0.52 expects a
+// UUID string (field 6) and an embedded signer (field 5). A second helper is
+// built from the exact v0.52 source with only its certificate parser modernized,
+// preserving the original SenderCertificate layout for the old app.
 
 typedef void (*HookMessage)(Class, SEL, IMP, IMP *);
 typedef void (*HookFunction)(void *, void *, void **);
@@ -74,6 +75,8 @@ static NSString *timestamp(void) {
 
 typedef struct SignalFfiError SignalFfiError;
 typedef struct SignalSgxClientState SignalSgxClientState;
+typedef struct SignalSenderCertificate SignalSenderCertificate;
+typedef struct SignalPublicKey SignalPublicKey;
 typedef struct {
     const unsigned char *base;
     size_t length;
@@ -94,6 +97,14 @@ typedef uint32_t (*SBErrorTypeFn)(const SignalFfiError *);
 typedef SignalFfiError *(*SBErrorMessageFn)(const SignalFfiError *, const char **);
 typedef void (*SBErrorFreeFn)(SignalFfiError *);
 
+typedef SignalFfiError *(*SBSenderCertDeserializeFn)(
+    SignalSenderCertificate **, SBSignalBorrowedBuffer);
+typedef SignalFfiError *(*SBSenderCertDestroyFn)(SignalSenderCertificate *);
+typedef SignalFfiError *(*SBSenderCertValidateKnownRootsFn)(
+    bool *, const SignalSenderCertificate *, uint64_t);
+typedef SignalFfiError *(*SBOriginalSenderCertValidateFn)(
+    bool *, const SignalSenderCertificate *, const SignalPublicKey *, uint64_t);
+
 static SBCdsiNewFn pqCdsiNew;
 static SBSgxDestroyFn pqSgxDestroy;
 static SBSgxInitialFn pqSgxInitial;
@@ -105,6 +116,18 @@ static SBFreeStringFn pqFreeString;
 static SBErrorTypeFn pqErrorType;
 static SBErrorMessageFn pqErrorMessage;
 static SBErrorFreeFn pqErrorFree;
+
+static SBSenderCertDeserializeFn certDeserialize;
+static SBSenderCertDestroyFn certDestroy;
+static SBSenderCertValidateKnownRootsFn certValidateKnownRoots;
+static SBFreeStringFn certFreeString;
+static SBErrorTypeFn certErrorType;
+static SBErrorMessageFn certErrorMessage;
+static SBErrorFreeFn certErrorFree;
+
+static SBSenderCertDeserializeFn originalSenderCertDeserialize;
+static SBSenderCertDestroyFn originalSenderCertDestroy;
+static SBOriginalSenderCertValidateFn originalSenderCertValidate;
 
 static SBCdsiNewFn originalCdsiNew;
 static SBSgxDestroyFn originalSgxDestroy;
@@ -122,6 +145,9 @@ static NSMutableSet<NSValue *> *pqHandles;
 static NSMutableSet<NSValue *> *pqBuffers;
 static NSMutableSet<NSValue *> *pqStrings;
 static NSMutableSet<NSValue *> *pqErrors;
+static NSMutableSet<NSValue *> *certHandles;
+static NSMutableSet<NSValue *> *certErrors;
+static NSMutableSet<NSValue *> *certStrings;
 
 static NSValue *pqPointerValue(const void *pointer) {
     return pointer ? [NSValue valueWithPointer:pointer] : nil;
@@ -259,6 +285,69 @@ static SignalFfiError *hookedSgxRecv(SBSignalOwnedBuffer *out,
     return originalSgxRecv ? originalSgxRecv(out, handle, ciphertext) : NULL;
 }
 
+
+static uint32_t certTrackError(SignalFfiError *error) {
+    if (!error) return 0;
+    pqSetAdd(certErrors, error);
+    return certErrorType ? certErrorType(error) : 0;
+}
+
+static SignalFfiError *hookedSenderCertDeserialize(
+    SignalSenderCertificate **out,
+    SBSignalBorrowedBuffer data) {
+
+    if (!certDeserialize) {
+        return originalSenderCertDeserialize
+            ? originalSenderCertDeserialize(out, data)
+            : NULL;
+    }
+
+    SignalFfiError *error = certDeserialize(out, data);
+    uint32_t type = certTrackError(error);
+    if (!error && out && *out) pqSetAdd(certHandles, *out);
+
+    appendTrace([NSString stringWithFormat:
+        @"[%@] SENDER-CERT deserialize parser=v0.52-modernized bytes=%lu result=%@ errorType=%u",
+        timestamp(),
+        (unsigned long)data.length,
+        error ? @"error" : @"ok",
+        type]);
+    return error;
+}
+
+static SignalFfiError *hookedSenderCertDestroy(SignalSenderCertificate *cert) {
+    if (pqSetContains(certHandles, cert) && certDestroy) {
+        pqSetRemove(certHandles, cert);
+        SignalFfiError *error = certDestroy(cert);
+        certTrackError(error);
+        return error;
+    }
+    return originalSenderCertDestroy ? originalSenderCertDestroy(cert) : NULL;
+}
+
+static SignalFfiError *hookedSenderCertValidate(
+    bool *out,
+    const SignalSenderCertificate *cert,
+    const SignalPublicKey *legacyTrustRoot,
+    uint64_t time) {
+
+    if (pqSetContains(certHandles, cert) && certValidateKnownRoots) {
+        SignalFfiError *error = certValidateKnownRoots(out, cert, time);
+        uint32_t type = certTrackError(error);
+        appendTrace([NSString stringWithFormat:
+            @"[%@] SENDER-CERT validate roots=legacy+current result=%@ valid=%@ errorType=%u",
+            timestamp(),
+            error ? @"error" : @"ok",
+            (!error && out && *out) ? @"yes" : @"no",
+            type]);
+        return error;
+    }
+
+    return originalSenderCertValidate
+        ? originalSenderCertValidate(out, cert, legacyTrustRoot, time)
+        : NULL;
+}
+
 static void hookedSignalFreeBuffer(const unsigned char *buffer, size_t length) {
     if (pqSetContains(pqBuffers, buffer) && pqFreeBuffer) {
         pqSetRemove(pqBuffers, buffer);
@@ -269,6 +358,11 @@ static void hookedSignalFreeBuffer(const unsigned char *buffer, size_t length) {
 }
 
 static void hookedSignalFreeString(const char *string) {
+    if (pqSetContains(certStrings, string) && certFreeString) {
+        pqSetRemove(certStrings, string);
+        certFreeString(string);
+        return;
+    }
     if (pqSetContains(pqStrings, string) && pqFreeString) {
         pqSetRemove(pqStrings, string);
         pqFreeString(string);
@@ -278,12 +372,25 @@ static void hookedSignalFreeString(const char *string) {
 }
 
 static uint32_t hookedSignalErrorType(const SignalFfiError *error) {
+    if (pqSetContains(certErrors, error) && certErrorType) return certErrorType(error);
     if (pqSetContains(pqErrors, error) && pqErrorType) return pqErrorType(error);
     return originalSignalErrorType ? originalSignalErrorType(error) : 0;
 }
 
 static SignalFfiError *hookedSignalErrorMessage(const SignalFfiError *error,
                                                 const char **out) {
+    if (pqSetContains(certErrors, error) && certErrorMessage) {
+        SignalFfiError *secondary = certErrorMessage(error, out);
+        certTrackError(secondary);
+        if (!secondary && out && *out) {
+            pqSetAdd(certStrings, *out);
+            appendTrace([NSString stringWithFormat:
+                @"[%@] SENDER-CERT error: %s",
+                timestamp(),
+                *out]);
+        }
+        return secondary;
+    }
     if (pqSetContains(pqErrors, error) && pqErrorMessage) {
         SignalFfiError *secondary = pqErrorMessage(error, out);
         pqTrackError(secondary);
@@ -300,6 +407,11 @@ static SignalFfiError *hookedSignalErrorMessage(const SignalFfiError *error,
 }
 
 static void hookedSignalErrorFree(SignalFfiError *error) {
+    if (pqSetContains(certErrors, error) && certErrorFree) {
+        pqSetRemove(certErrors, error);
+        certErrorFree(error);
+        return;
+    }
     if (pqSetContains(pqErrors, error) && pqErrorFree) {
         pqSetRemove(pqErrors, error);
         pqErrorFree(error);
@@ -384,6 +496,80 @@ static BOOL installCdsiPQBridge(void) {
         @"PQ-CDSI bridge: libsignal=0.71+sourcepatch helper=%@ hooks=%@.",
         helperReady ? @"ready" : @"missing",
         hooksReady ? @"ready" : @"partial"]);
+    return helperReady && hooksReady;
+}
+
+
+static BOOL installSenderCertificateBridge(void) {
+    if (!hookFunction) {
+        appendTrace(@"SENDER-CERT bridge: MSHookFunction unavailable.");
+        return NO;
+    }
+
+    void *bridge = dlopen(
+        "/Library/MobileSubstrate/DynamicLibraries/SignalSenderCertBridge.dylib",
+        RTLD_NOW | RTLD_LOCAL);
+    if (!bridge) {
+        const char *error = dlerror();
+        appendTrace([NSString stringWithFormat:
+            @"SENDER-CERT bridge load failed: %s",
+            error ?: "unknown"]);
+        return NO;
+    }
+
+#define CERT_LOAD(name, type) ((type)dlsym(bridge, name))
+    certDeserialize = CERT_LOAD("sb52_sender_certificate_deserialize", SBSenderCertDeserializeFn);
+    certDestroy = CERT_LOAD("sb52_sender_certificate_destroy", SBSenderCertDestroyFn);
+    certValidateKnownRoots = CERT_LOAD(
+        "sb52_sender_certificate_validate_known_roots",
+        SBSenderCertValidateKnownRootsFn);
+    certFreeString = CERT_LOAD("sb52_free_string", SBFreeStringFn);
+    certErrorType = CERT_LOAD("sb52_error_get_type", SBErrorTypeFn);
+    certErrorMessage = CERT_LOAD("sb52_error_get_message", SBErrorMessageFn);
+    certErrorFree = CERT_LOAD("sb52_error_free", SBErrorFreeFn);
+#undef CERT_LOAD
+
+    BOOL helperReady =
+        certDeserialize && certDestroy && certValidateKnownRoots &&
+        certFreeString && certErrorType && certErrorMessage && certErrorFree;
+    if (!helperReady) {
+        appendTrace(@"SENDER-CERT bridge: helper exports incomplete.");
+        return NO;
+    }
+
+    certHandles = [NSMutableSet set];
+    certErrors = [NSMutableSet set];
+    certStrings = [NSMutableSet set];
+
+#define CERT_HOOK(symbolName, replacement, original) do { \
+    void *symbol = dlsym(RTLD_DEFAULT, symbolName); \
+    if (symbol) hookFunction(symbol, (void *)(replacement), (void **)&(original)); \
+} while (0)
+
+    CERT_HOOK(
+        "signal_sender_certificate_deserialize",
+        hookedSenderCertDeserialize,
+        originalSenderCertDeserialize);
+    CERT_HOOK(
+        "signal_sender_certificate_destroy",
+        hookedSenderCertDestroy,
+        originalSenderCertDestroy);
+    CERT_HOOK(
+        "signal_sender_certificate_validate",
+        hookedSenderCertValidate,
+        originalSenderCertValidate);
+#undef CERT_HOOK
+
+    BOOL hooksReady =
+        originalSenderCertDeserialize &&
+        originalSenderCertDestroy &&
+        originalSenderCertValidate;
+
+    appendTrace([NSString stringWithFormat:
+        @"SENDER-CERT bridge: parser=v0.52-modernized helper=%@ hooks=%@ roots=legacy+current.",
+        helperReady ? @"ready" : @"missing",
+        hooksReady ? @"ready" : @"partial"]);
+
     return helperReady && hooksReady;
 }
 
@@ -1737,7 +1923,7 @@ static SetHiddenFn originalExpirationNagSetHidden;
 
 static void expirationNagSetHidden(id self, SEL sel, BOOL hidden) {
     // ExpirationNagView is the local reminder used for both app/OS expiry.
-    // v1.5.12 only prevents this reminder view from becoming visible; it does
+    // v1.5.13 only prevents this reminder view from becoming visible; it does
     // not spoof UIDevice/iOS globally and does not touch any login/network state.
     if (originalExpirationNagSetHidden) {
         originalExpirationNagSetHidden(self, sel, YES);
@@ -1768,7 +1954,7 @@ __attribute__((constructor)) static void start(void) {
 
         appendTrace(@"\n============================================================");
         appendTrace([NSString stringWithFormat:
-            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.12 source-patched CDSI helper\nApp: %@ (%@)\niOS: %@\nV1.5.11 still rejected INTEL-SA-00615 even after post-load byte replacement. This build compiles official libsignal 0.71 from source with ENCLAVE_ID_CDSI=15637fa at compile time, preserving its existing advisory allowance and PQ handshake.\n",
+            @"NEW SIGNAL LAUNCH %@\nSignalBypass14 v1.5.13 sender-certificate compatibility\nApp: %@ (%@)\niOS: %@\nKeeps v1.5.12 CDSI. Adds an exact-libsignal-0.52 sender-certificate parser that accepts current UUID-bytes/signer-id certificates and validates them against both the legacy and current production Sealed Sender trust roots.\n",
             timestamp(),
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?",
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"?",
@@ -1794,6 +1980,7 @@ __attribute__((constructor)) static void start(void) {
         }
 
         installCdsiPQBridge();
+        installSenderCertificateBridge();
         installCdsiRemoteConfigForce(provider);
         installHTTPResponseRemoteConfigAdapter();
 

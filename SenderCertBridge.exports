@@ -1,0 +1,7 @@
+_sb52_sender_certificate_deserialize
+_sb52_sender_certificate_destroy
+_sb52_sender_certificate_validate_known_roots
+_sb52_free_string
+_sb52_error_get_type
+_sb52_error_get_message
+_sb52_error_free

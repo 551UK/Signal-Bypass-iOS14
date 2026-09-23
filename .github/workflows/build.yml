@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.12-rootful
+          name: SignalBypass14-1.5.13-rootful
           path: build/*.deb
           if-no-files-found: error
 
@@ -43,38 +43,40 @@ jobs:
           cat > build/release-notes.md <<'NOTES'
           Rootful Signal iOS 14 compatibility build.
 
-          v1.5.11 confirmed the runtime byte patch was not enough:
-          - the helper reported one c6ff... constant patched
-          - current CDSI still opened with HTTP 101 and delivered 24,988-byte attestation
-          - libsignal 0.71 still rejected INTEL-SA-00615
-          - no /v1/messages/<recipient> request was created
+          v1.5.13 keeps the v1.5.12 CDSI changes and targets a separate
+          compatibility break in Sealed Sender certificates.
 
-          v1.5.12 removes that fragile post-load patch. Instead the build:
-          - checks out official libsignal v0.71.0 at commit
-            eac4cf58ed9b102778b477a9657d4a348cf28f9c
-          - changes only rust/attest/src/constants.rs ENCLAVE_ID_CDSI from the
-            retired c6ff0682... measurement to current 15637fa1...
-          - compiles libsignal-ffi for aarch64-apple-ios using Signal's own
-            swift/build_ffi.sh (which targets iOS 13)
-          - links that source-patched library only into SignalCdsiPQBridge
-          - preserves v0.71's existing INTEL-SA-00615/00657 allowance and
-            post-quantum Noise implementation
-          - leaves Signal 7.19.1's original libsignal 0.52 in place for all
-            non-CDSI cryptography
+          Signal 7.19.1/libsignal 0.52 expects:
+          - sender UUID as protobuf field 6 string
+          - an embedded ServerCertificate in field 5
+          - the original production Sealed Sender trust root
 
-          SGX attestation is still fully performed; no attestation check is disabled.
+          Current Signal-Server generates:
+          - sender UUID as 16-byte field 7
+          - signer as referenced certificate id in field 8
+          - production signer id 3, chained to the newer production trust root
 
-          Expected success markers:
-          - PQ-CDSI helper: libsignal 0.71 source-compiled...
-          - PQ-CDSI new ... result=ok
-          - PQ-CDSI initialRequest ... result=ok
-          - CDSI WS-FRAME OUT
-          - PQ-CDSI completeHandshake ... result=ok
-          - establishedSend/Recv followed by /v1/messages/<recipient>
+          This build:
+          - checks out the exact libsignal v0.52.0 source used by the old client
+          - changes only SenderCertificate protobuf parsing/encoding compatibility
+          - resolves known signer ids 2/3 to Signal's published server certificates
+          - keeps SenderCertificate's Rust struct layout unchanged
+          - hooks only sender-certificate deserialize/destroy/validate
+          - validates against both the legacy and current production trust roots
+          - does not bypass certificate signatures or expiry validation
+          - preserves the original serialized certificate bytes, so the server
+            signature remains valid and the same certificate is sent to recipients
+          - keeps all non-certificate Signal 7.19.1 crypto on its original libsignal
+
+          Expected log markers:
+          - SENDER-CERT bridge: parser=v0.52-modernized ... hooks=ready
+          - SENDER-CERT deserialize ... result=ok
+          - SENDER-CERT validate ... valid=yes
+          - then CDSI/session setup and /v1/messages/<recipient>
           NOTES
 
-          gh release create v1.5.12 build/uk.551.signalbypass14_1.5.12_iphoneos-arm.deb \
+          gh release create v1.5.13 build/uk.551.signalbypass14_1.5.13_iphoneos-arm.deb \
             --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.12' \
+            --title 'Signal Bypass iOS 14 v1.5.13' \
             --notes-file build/release-notes.md \
             --prerelease
