@@ -10,8 +10,8 @@ mkdir -p build package/DEBIAN package/Library/MobileSubstrate/DynamicLibraries
 mkdir -p package/usr/libexec
 
 # Signal 7.19.1 bundles libsignal 0.52, whose CDSI Noise handshake is pre-PQ.
-# v0.71.0 is the first libsignal release with post-quantum CDSI while its
-# official podspec still supports iOS 13. Use Signal's signed build artifact.
+# Keep v0.71.0 because it is PQ-capable and officially supports iOS 13/14.
+# v1.5.11 patches only its stale CDSI enclave advisory-map key at runtime.
 LIBSIGNAL71_VERSION="0.71.0"
 LIBSIGNAL71_SHA256="0bcf7d7255f153920ffa6cf03fe84a831a995347c767cd9f72463411296a0616"
 LIBSIGNAL71_ARCHIVE="build/libsignal-client-ios-build-v${LIBSIGNAL71_VERSION}.tar.gz"
@@ -85,7 +85,7 @@ BRIDGE_MODE="$(stat -f '%Lp' package/Library/MobileSubstrate/DynamicLibraries/Si
   exit 1
 }
 
-dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_1.5.10_iphoneos-arm.deb
+dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_1.5.11_iphoneos-arm.deb
 
-dpkg-deb --info build/uk.551.signalbypass14_1.5.10_iphoneos-arm.deb
-dpkg-deb --contents build/uk.551.signalbypass14_1.5.10_iphoneos-arm.deb
+dpkg-deb --info build/uk.551.signalbypass14_1.5.11_iphoneos-arm.deb
+dpkg-deb --contents build/uk.551.signalbypass14_1.5.11_iphoneos-arm.deb

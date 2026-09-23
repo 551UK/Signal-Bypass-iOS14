@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.5.10
+Version: 1.5.11
 Architecture: iphoneos-arm
-Description: Uses a libsignal 0.71 post-quantum CDSI compatibility bridge on iOS 14 while preserving Signal 7.19.1's original crypto/runtime for all non-CDSI operations.
+Description: Fixes current CDSI attestation on iOS 14 by updating libsignal 0.71's enclave advisory allowlist key while preserving Signal 7.19.1 crypto elsewhere.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks
