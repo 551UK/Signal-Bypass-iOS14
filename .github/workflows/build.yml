@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install package tools
-        run: brew install ldid dpkg
+        run: brew install ldid dpkg protobuf
 
       - name: Build and inspect rootful package
         run: bash scripts/build.sh
