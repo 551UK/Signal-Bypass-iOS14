@@ -296,7 +296,7 @@ CERT_BRIDGE_MODE="$(stat -f '%Lp' package/Library/MobileSubstrate/DynamicLibrari
   exit 1
 }
 
-dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_1.5.15_iphoneos-arm.deb
+dpkg-deb --root-owner-group -Zgzip --build package build/uk.551.signalbypass14_1.5.13_iphoneos-arm.deb
 
-dpkg-deb --info build/uk.551.signalbypass14_1.5.15_iphoneos-arm.deb
-dpkg-deb --contents build/uk.551.signalbypass14_1.5.15_iphoneos-arm.deb
+dpkg-deb --info build/uk.551.signalbypass14_1.5.13_iphoneos-arm.deb
+dpkg-deb --contents build/uk.551.signalbypass14_1.5.13_iphoneos-arm.deb

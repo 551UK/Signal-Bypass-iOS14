@@ -1,8 +1,8 @@
 Package: uk.551.signalbypass14
 Name: Signal Bypass iOS 14
-Version: 1.5.15
+Version: 1.5.13
 Architecture: iphoneos-arm
-Description: Preserves v1.5.13 and isolates Sealed Sender by forcing identified recipient sends while leaving session crypto unchanged.
+Description: Adds current sender-certificate wire-format and trust-root compatibility to Signal 7.19.1 while preserving the v1.5.12 CDSI fix and original messaging crypto.
 Maintainer: 551UK
 Author: 551UK
 Section: Tweaks

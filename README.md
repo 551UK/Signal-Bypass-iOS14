@@ -1,7 +1,9 @@
-Dont download, this is not complete. 
+# Signal Bypass iOS 14
 
-Fixes number reg so you can login.
+- Fixes phone-number registration and login.
+- Removes the unsupported-iOS banner.
+- Gets outgoing messages past the loading spinner to one tick.
 
-Fixes messages to 1 tick but still has compatibly issues with later signal versions
+**This tweak is not complete.** One tick does not mean messages are delivered, and compatibility issues with newer Signal versions remain. The remaining work will be completed at a later date.
 
-Needs more work, fix at later date.
+Retained versions: **v1.4.6** (login and banner fixes) and **v1.5.13** (one-tick sending).

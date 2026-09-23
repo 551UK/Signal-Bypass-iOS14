@@ -1,81 +1,19 @@
-name: Build iOS 14 DEB
-
+name: Build retained iOS 14 source
 on:
-  push:
-    branches: [main]
-    paths:
-      - Tweak.m
-      - BuildDate.m
-      - control
-      - SignalBypass14.plist
-      - scripts/**
-      - .github/workflows/build.yml
   workflow_dispatch:
-
 permissions:
-  contents: write
-
+  contents: read
 jobs:
   build:
     runs-on: macos-14
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Install package tools
         run: brew install ldid dpkg protobuf
-
       - name: Build and inspect rootful package
         run: bash scripts/build.sh
-
       - uses: actions/upload-artifact@v4
         with:
-          name: SignalBypass14-1.5.15-rootful
+          name: SignalBypass14-1.5.13-rootful
           path: build/*.deb
           if-no-files-found: error
-
-      - name: Publish prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          cat > build/release-notes.md <<'NOTES'
-          Rootful Signal iOS 14 compatibility build.
-
-          v1.5.13 fixed the original sender-side block: messages now reach
-          /v1/messages and the sender UI reaches one tick. The modern recipient
-          still shows "A message from ... could not be delivered".
-
-          v1.5.14 tried to change the stored SPQR capability, but the device log
-          proved that request never reached the server (NSURLErrorDomain/-1200).
-          This build removes that failed side path and performs a narrower
-          one-variable test.
-
-          v1.5.15 keeps all v1.5.13 compatibility fixes and changes only the
-          recipient profile view seen by Signal 7.19.1:
-          - remove the profile's unidentifiedAccess verifier
-          - force unrestrictedUnidentifiedAccess=false
-          - the stock 7.19 ProfileFetcherJob therefore records UD as disabled
-          - MessageSender naturally passes sealedSenderParameters=nil
-          - outgoing 1:1 messages use the normal authenticated/identified path
-            instead of Sealed Sender
-          - the underlying libsignal session encryption is unchanged
-
-          This tells us exactly which layer remains:
-          - if the modern phone now displays the message/two ticks, finish the
-            Sealed Sender compatibility work
-          - if it still shows the delivery/decryption placeholder, move directly
-            to the old 0.52 session/SPQR crypto path
-
-          Inbound crypto stage tracing from v1.5.14 remains enabled.
-
-          Expected marker before the test send:
-          - IDENTIFIED-SEND profile compatibility: UD verifier hidden
-          NOTES
-
-          gh release create v1.5.15 build/uk.551.signalbypass14_1.5.15_iphoneos-arm.deb \
-            --target "$GITHUB_SHA" \
-            --title 'Signal Bypass iOS 14 v1.5.15' \
-            --notes-file build/release-notes.md \
-            --prerelease
